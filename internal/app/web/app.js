@@ -191,7 +191,9 @@ async function boot() {
 
 function shell() {
   const navItems = [['#/', 'Tổng quan'], ['#/events', 'Sự kiện']];
+  const helpItem = ['#/help', 'Hướng dẫn'];
   if (me.role === 'admin') navItems.push(['#/admin/routers', 'Router'], ['#/admin/users', 'Người dùng'], ['#/admin/settings', 'Cài đặt']);
+  navItems.push(helpItem);
   const hash = location.hash || '#/';
   const nav = h('nav', { class: 'nav' }, navItems.map(([href, t]) => h('a', {
     href, class: (href === '#/' ? hash === '#/' || hash.startsWith('#/r/') : hash.startsWith(href)) ? 'on' : null,
@@ -215,6 +217,7 @@ function route() {
   if (parts[0] === 'r' && parts[1]) p = routerPage(+parts[1], parts[2] || 'overview');
   else if (parts[0] === 'events') p = eventsPage();
   else if (parts[0] === 'account') p = accountPage();
+  else if (parts[0] === 'help') p = helpPage(parts[1] ? decodeURIComponent(parts[1]) : '');
   else if (parts[0] === 'admin' && me.role === 'admin') p = ({ routers: adminRoutersPage, users: usersPage, settings: settingsPage })[parts[1]]?.();
   p = p || overviewPage();
   page = p;
@@ -820,17 +823,29 @@ function tabIp(id) {
 const SEV = { critical: ['down', 'Nghiêm trọng'], high: ['down', 'Cao'], medium: ['waiting', 'Trung bình'], low: ['unknown', 'Thấp'], info: ['unknown', 'Thông tin'] };
 const AREA = { security: 'Bảo mật', performance: 'Hiệu suất', reliability: 'Độ ổn định' };
 
-// md renders a small, safe subset of Markdown into DOM nodes (no innerHTML).
-function md(text) {
+// slugify makes GitHub-style heading anchors (Vietnamese letters kept).
+const slugify = t => t.toLowerCase().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[^\p{L}\p{N}\s-]/gu, '').trim().replace(/\s/g, '-');
+
+// md renders a safe subset of Markdown into DOM nodes (never innerHTML):
+// headings with anchors, paragraphs, nested lists, fenced code (copyable),
+// tables, blockquotes, links, **bold**, `code`, horizontal rules.
+function md(text, opts = {}) {
   const root = h('div', { class: 'md' });
   const inline = str => {
     const out = [];
-    const re = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+    const re = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\))/g;
     let last = 0, m;
     while ((m = re.exec(str))) {
       if (m.index > last) out.push(str.slice(last, m.index));
       const t = m[0];
-      out.push(t[0] === '`' ? h('code', null, t.slice(1, -1)) : h('b', null, t.slice(2, -2)));
+      if (t[0] === '`') out.push(h('code', null, t.slice(1, -1)));
+      else if (t[0] === '*') out.push(h('b', null, t.slice(2, -2)));
+      else {
+        const [, label, href] = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(t);
+        if (href.startsWith('#')) out.push(h('a', { href: '#', onclick: e => { e.preventDefault(); opts.onAnchor && opts.onAnchor(decodeURIComponent(href.slice(1))); } }, inline(label)));
+        else if (/^https?:\/\//.test(href)) out.push(h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label));
+        else out.push(label);
+      }
       last = m.index + t.length;
     }
     if (last < str.length) out.push(str.slice(last));
@@ -840,38 +855,63 @@ function md(text) {
   let list = null, para = [];
   const flushPara = () => { if (para.length) { root.append(h('p', null, inline(para.join(' ')))); para = []; } };
   const flushList = () => { list = null; };
+  const indentOf = l => l.length - l.trimStart().length;
+  const place = (el, indent) => { if (indent >= 2 && list) (list.sub ? list.sub.el.lastChild || list.li : list.li).append(el); else { flushList(); root.append(el); } };
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^```/.test(line)) {
-      flushPara(); flushList();
-      const code = [];
-      while (++i < lines.length && !/^```/.test(lines[i])) code.push(lines[i]);
-      root.append(codeBlock(code.join('\n')));
-      continue;
-    }
-    if (/^\|.*\|\s*$/.test(line)) {
-      flushPara(); flushList();
-      const rows = [];
-      while (i < lines.length && /^\|.*\|\s*$/.test(lines[i])) { rows.push(lines[i]); i++; }
-      i--;
-      const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim());
-      const body = rows.filter(r => !/^\|[\s:|-]+\|$/.test(r.trim()));
-      root.append(h('div', { class: 'tw' }, h('table', null,
-        h('thead', null, h('tr', null, cells(body[0] || '').map(x => h('th', null, inline(x))))),
-        h('tbody', null, body.slice(1).map(r => h('tr', null, cells(r).map(x => h('td', null, inline(x)))))))));
-      continue;
-    }
+    const line = lines[i], ind = indentOf(line), tl = line.trim();
     let m;
-    if ((m = /^(#{1,4})\s+(.*)/.exec(line))) { flushPara(); flushList(); root.append(h('h' + Math.min(m[1].length + 1, 4), null, inline(m[2]))); continue; }
-    if ((m = /^\s*([-*]|\d+[.)])\s+(.*)/.exec(line))) {
+    if (/^```/.test(tl)) {
       flushPara();
-      const ordered = /\d/.test(m[1]);
-      if (!list || list.ordered !== ordered) { list = { el: h(ordered ? 'ol' : 'ul'), ordered }; root.append(list.el); }
-      list.el.append(h('li', null, inline(m[2])));
+      const code = [];
+      while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i].slice(Math.min(ind, indentOf(lines[i]))));
+      place(codeBlock(code.join('\n')), ind);
       continue;
     }
-    if (!line.trim()) { flushPara(); flushList(); continue; }
-    flushList(); para.push(line.trim());
+    if (/^>/.test(tl)) {
+      flushPara();
+      const q = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) { q.push(lines[i].trim().replace(/^>\s?/, '')); i++; }
+      i--;
+      place(h('div', { class: 'quote' }, md(q.join('\n'), opts)), ind);
+      continue;
+    }
+    if (/^\|.*\|$/.test(tl)) {
+      flushPara();
+      const rows = [];
+      while (i < lines.length && /^\|.*\|$/.test(lines[i].trim())) { rows.push(lines[i].trim()); i++; }
+      i--;
+      const cells = r => r.replace(/^\||\|$/g, '').split('|').map(x => x.trim());
+      const body = rows.filter(r => !/^\|[\s:|-]+\|$/.test(r));
+      place(h('div', { class: 'tw' }, h('table', null,
+        h('thead', null, h('tr', null, cells(body[0] || '').map(x => h('th', null, inline(x))))),
+        h('tbody', null, body.slice(1).map(r => h('tr', null, cells(r).map(x => h('td', null, inline(x)))))))), ind);
+      continue;
+    }
+    if (/^-{3,}$/.test(tl) && ind === 0) { flushPara(); flushList(); root.append(h('hr')); continue; }
+    if ((m = /^(#{1,4})\s+(.*)/.exec(tl)) && ind === 0) {
+      flushPara(); flushList();
+      const level = Math.min(m[1].length + (opts.levelOffset ?? 1), 5); // reports demote headings under the panel title
+      root.append(h('h' + level, { id: (opts.idPrefix || '') + slugify(m[2]) }, inline(m[2])));
+      continue;
+    }
+    if ((m = /^([-*]|(\d+)[.)])\s+(.*)/.exec(tl))) {
+      flushPara();
+      const ordered = !!m[2];
+      if (ind >= 2 && list) { // nested item
+        if (!list.sub || list.sub.ordered !== ordered) { list.sub = { el: h(ordered ? 'ol' : 'ul'), ordered }; list.li.append(list.sub.el); }
+        list.sub.el.append(h('li', null, inline(m[3])));
+        continue;
+      }
+      if (!list || list.ordered !== ordered) { list = { el: h(ordered ? 'ol' : 'ul', ordered ? { start: m[2] } : null), ordered }; root.append(list.el); }
+      list.li = h('li', null, inline(m[3]));
+      list.sub = null;
+      list.el.append(list.li);
+      continue;
+    }
+    if (!tl) { flushPara(); continue; } // blank lines keep lists open (numbering continues)
+    if (ind >= 2 && list) { list.li.append(' ', ...inline(tl)); continue; }
+    flushList();
+    para.push(tl);
   }
   flushPara();
   return root;
@@ -1120,6 +1160,48 @@ function routerForm(r, view) {
   (r.wans || []).forEach(addWan);
   const detected = (view?.detectedWans || []).filter(n => !(r.wans || []).some(w => w.iface === n));
   const testOut = h('div');
+  // --- setup command generator: builds the exact RouterOS commands for this router
+  const wzIP = h('input', { value: lanHost(), class: 'mono', placeholder: 'IP máy NetPulse mà router nhìn thấy' });
+  const wzOut = h('div', { class: 'stack' });
+  let wzPass = '';
+  const genPass = () => {
+    const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+    const a = new Uint32Array(20);
+    crypto.getRandomValues(a);
+    return [...a].map(x => cs[x % cs.length]).join('');
+  };
+  const renderWizard = () => {
+    const ip = wzIP.value.trim() || '<IP-NetPulse>', rip = host.value.trim() || '<IP-router>', u = user.value.trim() || 'netpulse';
+    const pw = wzPass || pass.value || '<MatKhauManh>';
+    const step = (title, cmds, note) => h('div', null, h('b', null, title), note ? h('div', { class: 'hint' }, note) : null, codeBlock(cmds));
+    const steps = [step('Bước 1 – Tạo nhóm quyền chỉ đọc và user cho NetPulse',
+      `/user group add name=netpulse policy=read,test,api,rest-api\n/user add name=${u} group=netpulse address=${ip}/32 password="${pw}"`,
+      'Nếu báo nhóm đã tồn tại thì bỏ qua lệnh đầu. RouterOS cũ báo lỗi ở “rest-api” thì xoá “,rest-api”. User chỉ đăng nhập được từ máy NetPulse.')];
+    if (tls.checked) {
+      steps.push(step('Bước 2 – Tạo chứng chỉ HTTPS (chạy từng dòng, đợi mỗi lệnh sign báo xong)',
+        `/certificate add name=netpulse-ca common-name=netpulse-ca key-usage=key-cert-sign,crl-sign days-valid=3650\n/certificate sign netpulse-ca\n/certificate add name=netpulse-www common-name=${rip} days-valid=3650\n/certificate sign netpulse-www ca=netpulse-ca`,
+        'Kiểm tra bằng /certificate print: netpulse-www phải có cờ K. Nếu báo “Name exists”, chứng chỉ đã có – chuyển sang bước 3.'));
+      steps.push(step('Bước 3 – Bật HTTPS (www-ssl) chỉ cho máy NetPulse', `/ip service set www-ssl certificate=netpulse-www disabled=no address=${ip}/32`,
+        'Nếu bạn còn dùng WebFig HTTPS từ máy khác, thêm IP máy đó vào address=, cách nhau dấu phẩy.'));
+    } else {
+      steps.push(step('Bước 2 – Bật HTTP (www) chỉ cho máy NetPulse', `/ip service set www disabled=no address=${ip}/32`, 'HTTP không mã hoá mật khẩu: chỉ dùng trong LAN tin cậy.'));
+    }
+    steps.push(step(`Bước ${steps.length + 1} – Chỉ khi “Kiểm tra kết nối” báo timeout: cho phép NetPulse qua firewall`,
+      `/ip firewall filter add chain=input src-address=${ip} protocol=tcp dst-port=${tls.checked ? 443 : 80} action=accept place-before=0 comment=NetPulse`));
+    fill(wzOut, steps);
+  };
+  const wizard = h('details', { class: 'full box wizard', open: isNew }, h('summary', null, h('b', null, '🛠 Tạo lệnh cấu hình router'), h('span', { class: 'muted small' }, ' – dán vào WinBox → New Terminal')),
+    h('div', { class: 'stack' },
+      h('div', { class: 'form' }, field('IP máy NetPulse (router sẽ chỉ cho phép IP này)', wzIP),
+        h('div', { class: 'row', style: null }, h('button', { type: 'button', onclick: () => {
+          wzPass = genPass(); pass.value = wzPass; renderWizard(); toast('Đã sinh mật khẩu mạnh và điền vào ô Mật khẩu', 'ok');
+        } }, '🔑 Sinh mật khẩu cho user router'))),
+      h('p', { class: 'hint' }, '1) Điền địa chỉ router ở trên. 2) Bấm “Sinh mật khẩu”. 3) Mở WinBox → New Terminal, chạy lần lượt từng khối lệnh (nút “Sao chép”). 4) Quay lại bấm “Kiểm tra kết nối”. User này chỉ đọc được dữ liệu và chạy ping, không đổi được cấu hình router. ', helpLink('router', 'Hướng dẫn chi tiết')),
+      wzOut));
+  [wzIP, host, user].forEach(x => x.addEventListener('input', renderWizard));
+  pass.addEventListener('input', () => { wzPass = ''; renderWizard(); });
+  tls.addEventListener('change', renderWizard);
+  renderWizard();
   const pullBox = h('div', { class: 'form full' },
     field('Địa chỉ router (IP/tên miền)', host), field('Cổng (để trống = mặc định)', port), field('User router (chỉ đọc)', user), field('Mật khẩu', pass),
     h('div', { class: 'full row' }, check('Dùng HTTPS (www-ssl)', tls), check('Kiểm tra chứng chỉ (bỏ chọn nếu router dùng chứng chỉ tự ký)', verify)),
@@ -1128,16 +1210,7 @@ function routerForm(r, view) {
       fillIfaces(res.interfaces || []);
       fill(testOut, h('div', { class: 'box ok' }, `✓ Kết nối được: ${res.identity || ''} · ${res.board || ''} · RouterOS ${res.version || ''} · ${res.interfaces.length} interface`, res.pingWarning ? h('div', { class: 'err-line' }, res.pingWarning) : null));
     }).catch(() => { }) }, 'Kiểm tra kết nối'), testOut),
-    h('details', { class: 'full' }, h('summary', { class: 'hint' }, 'Cách tạo user chỉ-đọc trên router (RouterOS 7.x)'),
-      h('pre', null, `/user group add name=netpulse policy=read,test,api,rest-api
-/user add name=netpulse group=netpulse password="MatKhauManh" address=<IP-may-NetPulse>/32
-# HTTPS (khuyên dùng):
-/certificate add name=netpulse-www common-name=router key-usage=tls-server
-/certificate sign netpulse-www
-/ip service set www-ssl certificate=netpulse-www disabled=no address=<IP-may-NetPulse>/32
-# hoặc HTTP trong LAN tin cậy:
-/ip service set www disabled=no address=<IP-may-NetPulse>/32`),
-      h('p', { class: 'hint' }, 'User chỉ có quyền đọc và ping; không thể thay đổi cấu hình router. Nếu RouterOS cũ báo không có policy rest-api, bỏ nó khỏi lệnh đầu.')));
+    wizard);
   const pushNote = h('p', { class: 'hint full' }, 'Sau khi lưu, bấm “Script cài” để tải file .rsc và nhập vào router. Router cần RouterOS 7.17+ và gọi được tới địa chỉ NetPulse.');
   const syncMode = () => { pullBox.classList.toggle('hidden', mode.value !== 'pull'); pushNote.classList.toggle('hidden', mode.value !== 'push'); };
   mode.addEventListener('change', syncMode); syncMode();
@@ -1302,6 +1375,7 @@ function settingsPage() {
           check('Che IP public và địa chỉ MAC trước khi gửi (khuyên dùng; báo cáo vẫn hiện giá trị thật)', aiAnon),
           check('Nếu tài khoản AI đang chọn bị lỗi (hết credit, key sai, quá tải), tự chuyển sang tài khoản khác', aiFallback),
           check('Tự động kiểm tra mọi router sáng Chủ nhật hằng tuần và gửi tóm tắt qua Telegram/Zalo', autoAudit),
+          h('p', { class: 'hint' }, helpLink('ai', 'Cách lấy API key cho từng nhà cung cấp'), ' · ', helpLink('audit', 'Trợ lý AI hoạt động thế nào')),
           h('p', { class: 'hint' }, 'Chi phí ước tính hiện trong từng báo cáo (với tài khoản ngoài Claude, nhập giá trong phần Sửa để tính). Ollama/LM Studio chạy trên máy của bạn: dữ liệu không ra khỏi mạng nội bộ, nhưng cần mô hình đủ mạnh và hỗ trợ gọi công cụ (tools).')));
       const sumOn = h('input', { type: 'checkbox', checked: st.summaryOn });
       const sumAt = h('input', { type: 'time', value: st.summaryAt });
@@ -1348,20 +1422,79 @@ function settingsPage() {
   };
 }
 
+// ---------- in-app guide ----------
+const HELP = { router: 'cách-a--rest-api-khuyên-dùng', push: 'cách-b--router-tự-gửi-dữ-liệu-push', telegram: '4-nhận-cảnh-báo-qua-telegram', zalo: '5-nhận-cảnh-báo-qua-zalo', ai: 'thêm-tài-khoản-ai', audit: '7-trợ-lý-ai-kiểm-tra-bảo-mật-và-hiệu-suất', trouble: '8-xử-lý-sự-cố' };
+const helpLink = (key, text = 'Xem hướng dẫn') => h('a', { href: '#/help/' + encodeURIComponent(HELP[key]), target: '_blank', rel: 'noopener' }, text + ' ↗');
+
+function lanHost() {
+  const hst = location.hostname;
+  return /^\d+\.\d+\.\d+\.\d+$/.test(hst) && !hst.startsWith('127.') ? hst : '';
+}
+
+function helpPage(section) {
+  let box;
+  return {
+    mount(main) { box = h('div', null, h('div', { class: 'empty' }, 'Đang tải hướng dẫn…')); main.append(box); },
+    load: () => api('GET', '/api/help'),
+    update(d) {
+      if (box.dataset.loaded) return;
+      box.dataset.loaded = '1';
+      const host = lanHost();
+      let text = d.markdown;
+      if (host && host !== '192.168.1.4') text = text.split('192.168.1.4').join(host); // examples use this server's real address
+      const go = slug => {
+        const el = document.getElementById('h-' + slug);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        history.replaceState(null, '', '#/help/' + encodeURIComponent(slug));
+      };
+      const content = md(text, { onAnchor: go, idPrefix: 'h-', levelOffset: 0 });
+      const heads = [...content.querySelectorAll('h2, h3')];
+      const toc = h('nav', { class: 'toc panel' }, h('b', null, 'Mục lục'),
+        heads.map(x => h('a', { href: '#', class: x.tagName === 'H3' ? 'sub' : null, onclick: e => { e.preventDefault(); go(x.id.slice(2)); } }, x.textContent)));
+      fill(box, h('div', { class: 'help-grid' }, toc, h('div', { class: 'panel panel-b help-body' },
+        host ? h('div', { class: 'hint' }, `Các lệnh mẫu đã dùng địa chỉ NetPulse bạn đang mở: ${host}. Nếu router kết nối tới NetPulse qua địa chỉ khác (VPN, NAT…), thay cho phù hợp.`) : null,
+        content, h('p', { class: 'hint' }, 'NetPulse ' + d.version))));
+      if (section) setTimeout(() => go(section), 60);
+    },
+  };
+}
+
 // ---------- AI accounts ----------
 const AI_PRESETS = [
-  { k: 'anthropic', name: 'Claude (Anthropic)', kind: 'anthropic', base: '', model: 'claude-opus-5-5', key: 'console.anthropic.com → API Keys' },
-  { k: 'openai', name: 'ChatGPT (OpenAI)', kind: 'openai', base: 'https://api.openai.com/v1', key: 'platform.openai.com → API keys' },
-  { k: 'gemini', name: 'Gemini (Google)', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai', key: 'aistudio.google.com → Get API key' },
-  { k: 'deepseek', name: 'DeepSeek', kind: 'openai', base: 'https://api.deepseek.com/v1', key: 'platform.deepseek.com → API keys' },
-  { k: 'xai', name: 'Grok (xAI)', kind: 'openai', base: 'https://api.x.ai/v1', key: 'console.x.ai → API Keys' },
-  { k: 'mistral', name: 'Mistral', kind: 'openai', base: 'https://api.mistral.ai/v1', key: 'console.mistral.ai → API Keys' },
-  { k: 'groq', name: 'Groq', kind: 'openai', base: 'https://api.groq.com/openai/v1', key: 'console.groq.com → API Keys' },
-  { k: 'openrouter', name: 'OpenRouter (nhiều mô hình)', kind: 'openai', base: 'https://openrouter.ai/api/v1', key: 'openrouter.ai → Keys' },
-  { k: 'qwen', name: 'Qwen (Alibaba Cloud)', kind: 'openai', base: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', key: 'Alibaba Cloud Model Studio → API Key' },
-  { k: 'ollama', name: 'Ollama (máy cục bộ)', kind: 'openai', base: 'http://localhost:11434/v1', key: 'không cần key', local: true },
-  { k: 'lmstudio', name: 'LM Studio (máy cục bộ)', kind: 'openai', base: 'http://localhost:1234/v1', key: 'không cần key', local: true },
-  { k: 'custom', name: 'Khác (tương thích OpenAI)', kind: 'openai', base: '', key: 'theo nhà cung cấp' },
+  { k: 'anthropic', name: 'Claude (Anthropic)', kind: 'anthropic', base: '', model: 'claude-opus-5-5', key: 'console.anthropic.com → API Keys', url: 'https://console.anthropic.com/settings/keys',
+    steps: ['Đăng nhập console.anthropic.com (đăng ký bằng email nếu chưa có).', 'Vào Settings → Billing, nạp credit (thanh toán thẻ quốc tế).', 'Vào API Keys → Create Key, đặt tên “NetPulse”, sao chép key (bắt đầu bằng sk-ant-).', 'Dán key vào ô bên dưới. Mô hình mặc định Claude Opus 5.5 đã được điền sẵn.'],
+    note: 'Key chỉ hiện một lần khi tạo. Có thể đặt giới hạn chi tiêu hằng tháng trong Settings → Limits.' },
+  { k: 'openai', name: 'ChatGPT (OpenAI)', kind: 'openai', base: 'https://api.openai.com/v1', key: 'platform.openai.com → API keys', url: 'https://platform.openai.com/api-keys',
+    steps: ['Đăng nhập platform.openai.com (trang dành cho lập trình viên, khác với chatgpt.com).', 'Vào Settings → Billing, nạp credit.', 'Vào API keys → Create new secret key, sao chép key (bắt đầu bằng sk-).', 'Dán key, bấm “Kiểm tra & lấy danh sách mô hình”, chọn mô hình GPT mới và mạnh nhất.'],
+    note: 'Gói ChatGPT Plus/Pro KHÔNG kèm API – API tính tiền riêng theo lượng dùng.' },
+  { k: 'gemini', name: 'Gemini (Google)', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai', key: 'aistudio.google.com → Get API key', url: 'https://aistudio.google.com/apikey',
+    steps: ['Đăng nhập aistudio.google.com bằng tài khoản Google.', 'Bấm Get API key → Create API key (chọn hoặc tạo một Google Cloud project).', 'Sao chép key (thường bắt đầu bằng AIza).', 'Dán key, bấm “Kiểm tra & lấy danh sách mô hình”, chọn mô hình Gemini Pro mới nhất.'],
+    note: 'Có gói miễn phí (giới hạn tần suất). Theo điều khoản Gemini API, dữ liệu gửi qua gói miễn phí có thể được Google dùng để cải thiện sản phẩm – nên bật thanh toán (Billing) nếu gửi cấu hình mạng thật.' },
+  { k: 'deepseek', name: 'DeepSeek', kind: 'openai', base: 'https://api.deepseek.com/v1', key: 'platform.deepseek.com → API keys', url: 'https://platform.deepseek.com/api_keys',
+    steps: ['Đăng nhập platform.deepseek.com.', 'Vào Top up, nạp tiền.', 'Vào API keys → Create new API key, sao chép key (bắt đầu bằng sk-).', 'Dán key và lấy danh sách mô hình.'],
+    note: 'Giá rẻ. Máy chủ DeepSeek đặt tại Trung Quốc – cân nhắc trước khi gửi cấu hình mạng của doanh nghiệp.' },
+  { k: 'xai', name: 'Grok (xAI)', kind: 'openai', base: 'https://api.x.ai/v1', key: 'console.x.ai → API Keys', url: 'https://console.x.ai',
+    steps: ['Đăng nhập console.x.ai (bằng tài khoản X hoặc email).', 'Nạp credit trong mục Billing.', 'Vào API Keys → Create API Key, sao chép key (bắt đầu bằng xai-).', 'Dán key và lấy danh sách mô hình.'] },
+  { k: 'mistral', name: 'Mistral', kind: 'openai', base: 'https://api.mistral.ai/v1', key: 'console.mistral.ai → API Keys', url: 'https://console.mistral.ai/api-keys',
+    steps: ['Đăng nhập console.mistral.ai.', 'Chọn gói (có gói dùng thử) trong mục Billing/Subscriptions.', 'Vào API Keys → Create new key, sao chép key.', 'Dán key và lấy danh sách mô hình (chọn bản “large”).'] },
+  { k: 'groq', name: 'Groq', kind: 'openai', base: 'https://api.groq.com/openai/v1', key: 'console.groq.com → API Keys', url: 'https://console.groq.com/keys',
+    steps: ['Đăng nhập console.groq.com.', 'Vào API Keys → Create API Key, sao chép key (bắt đầu bằng gsk_).', 'Dán key và lấy danh sách mô hình (chọn mô hình lớn có hỗ trợ tool use).'],
+    note: 'Có gói miễn phí giới hạn tần suất; tốc độ trả lời rất nhanh.' },
+  { k: 'openrouter', name: 'OpenRouter (nhiều mô hình)', kind: 'openai', base: 'https://openrouter.ai/api/v1', key: 'openrouter.ai → Keys', url: 'https://openrouter.ai/keys',
+    steps: ['Đăng nhập openrouter.ai.', 'Vào Credits, nạp tiền.', 'Vào Keys → Create Key, sao chép key (bắt đầu bằng sk-or-).', 'Dán key, lấy danh sách và chọn mô hình theo dạng hãng/tên (ví dụ của Anthropic, OpenAI, Google…).'],
+    note: 'Một key dùng được mô hình của nhiều hãng; giá theo từng mô hình trên openrouter.ai/models.' },
+  { k: 'qwen', name: 'Qwen (Alibaba Cloud)', kind: 'openai', base: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', key: 'Alibaba Cloud Model Studio → API Key', url: 'https://www.alibabacloud.com/help/en/model-studio/get-api-key',
+    steps: ['Đăng nhập Alibaba Cloud (bản quốc tế), kích hoạt Model Studio.', 'Tạo API Key trong Model Studio, sao chép key (bắt đầu bằng sk-).', 'Dán key và lấy danh sách mô hình (chọn qwen-max hoặc bản mới hơn).'],
+    note: 'Địa chỉ API mặc định là máy chủ quốc tế (Singapore).' },
+  { k: 'ollama', name: 'Ollama (máy cục bộ)', kind: 'openai', base: 'http://localhost:11434/v1', key: 'không cần key', local: true, url: 'https://ollama.com/download',
+    steps: ['Cài Ollama trên máy chạy NetPulse (hoặc một máy có GPU trong LAN).', 'Tải một mô hình hỗ trợ tools: chạy “ollama pull <tên-mô-hình>” (danh sách: ollama.com/search?c=tools).', 'Nếu Ollama ở máy khác: đặt biến môi trường OLLAMA_HOST=0.0.0.0, khởi động lại Ollama, và đổi “localhost” bên dưới thành IP máy đó.', 'Để trống API key, bấm “Kiểm tra & lấy danh sách mô hình”.'],
+    note: 'Miễn phí, dữ liệu không rời mạng nội bộ. Mô hình nhỏ phân tích kém hơn nhiều so với mô hình đám mây; nên dùng mô hình từ ~30B tham số trở lên.' },
+  { k: 'lmstudio', name: 'LM Studio (máy cục bộ)', kind: 'openai', base: 'http://localhost:1234/v1', key: 'không cần key', local: true, url: 'https://lmstudio.ai',
+    steps: ['Cài LM Studio, tải một mô hình có hỗ trợ tool use.', 'Vào tab Developer → Start Server (cổng 1234). Nếu ở máy khác, bật “Serve on Local Network” và đổi “localhost” thành IP máy đó.', 'Để trống API key, bấm “Kiểm tra & lấy danh sách mô hình”.'],
+    note: 'Miễn phí, dữ liệu không rời mạng nội bộ.' },
+  { k: 'custom', name: 'Khác (tương thích OpenAI)', kind: 'openai', base: '', key: 'theo nhà cung cấp',
+    steps: ['Dùng cho dịch vụ có API tương thích OpenAI Chat Completions và hỗ trợ tools (function calling).', 'Nhập địa chỉ API theo tài liệu nhà cung cấp (thường kết thúc bằng /v1).', 'Dán API key (nếu có) và lấy danh sách mô hình.'] },
 ];
 
 function aiAccountForm(p, done) {
@@ -1376,7 +1509,7 @@ function aiAccountForm(p, done) {
   const priceIn = h('input', { type: 'number', min: 0, step: 'any', value: p.priceIn || '', placeholder: 'tuỳ chọn' });
   const priceOut = h('input', { type: 'number', min: 0, step: 'any', value: p.priceOut || '', placeholder: 'tuỳ chọn' });
   const enabled = h('input', { type: 'checkbox', checked: isNew ? true : p.enabled });
-  const keyHint = h('p', { class: 'hint full' });
+  const keyHint = h('div', { class: 'full' });
   const testOut = h('div', { class: 'full' });
   const cur = () => AI_PRESETS.find(x => x.k === preset.value);
   const sync = (fromPreset) => {
@@ -1388,7 +1521,12 @@ function aiAccountForm(p, done) {
       model.value = x.model || '';
       fill(models);
     }
-    fill(keyHint, 'Lấy API key: ', h('b', null, x.key), x.local ? '. Địa chỉ “localhost” là máy đang chạy NetPulse; nếu AI chạy ở máy khác, đổi thành IP máy đó.' : '');
+    fill(keyHint, h('div', { class: 'box keyguide' },
+      h('div', { class: 'row' }, h('b', { class: 'grow' }, x.local ? 'Cách cài đặt ' + x.name : 'Cách lấy API key ' + x.name),
+        x.url ? h('a', { class: 'btn sm', href: x.url, target: '_blank', rel: 'noopener noreferrer' }, x.local ? 'Trang tải về ↗' : 'Mở trang lấy key ↗') : null),
+      h('ol', null, (x.steps || []).map(t => h('li', null, t))),
+      x.note ? h('div', { class: 'hint' }, '⚠ ', x.note) : null,
+      h('div', { class: 'hint' }, helpLink('ai', 'Hướng dẫn đầy đủ'))));
   };
   preset.addEventListener('change', () => sync(true));
   const collect = () => {

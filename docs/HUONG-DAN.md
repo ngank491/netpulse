@@ -13,6 +13,10 @@ Tài liệu này hướng dẫn từng bước:
 
 Trong hướng dẫn, `192.168.1.4` là IP máy chạy NetPulse và `192.168.1.1` là router. Hãy thay bằng địa chỉ thực tế của bạn.
 
+> Hướng dẫn này cũng có ngay trong NetPulse: menu **Hướng dẫn** (các lệnh mẫu tự dùng IP NetPulse bạn đang mở). Ngoài ra:
+> - form **Thêm router** có mục **🛠 Tạo lệnh cấu hình router**: sinh sẵn từng khối lệnh RouterOS và mật khẩu cho router của bạn;
+> - form **Thêm tài khoản AI** hiện các bước lấy API key của nhà cung cấp đang chọn, kèm nút mở trang lấy key.
+
 ---
 
 ## 1. Đăng nhập lần đầu
@@ -47,6 +51,8 @@ Có hai cách. Chọn **cách A** nếu NetPulse kết nối được tới rout
 ### Cách A – REST API (khuyên dùng)
 
 #### Bước A1. Tạo user chỉ-đọc trên router
+
+> **Cách nhanh:** trong NetPulse vào **Router → + Thêm router**, nhập địa chỉ router, mở mục **🛠 Tạo lệnh cấu hình router** và bấm **🔑 Sinh mật khẩu cho user router**. NetPulse tạo sẵn các lệnh của bước A1 và A2 (đúng IP, user, mật khẩu, HTTPS hoặc HTTP) và điền mật khẩu vào form. Bạn chỉ cần sao chép từng khối vào Terminal. Các bước dưới đây là giải thích chi tiết.
 
 Mở **WinBox → New Terminal**. Chạy **từng lệnh một**; nếu dán nhiều dòng cùng lúc, terminal có thể ngắt dòng làm hỏng lệnh.
 
@@ -295,7 +301,7 @@ NetPulse dùng được nhiều nhà cung cấp AI cùng lúc:
 | **Khác** | theo nhà cung cấp | Bất kỳ dịch vụ nào tương thích OpenAI Chat Completions |
 
 1. Vào **Cài đặt → Trợ lý AI kiểm tra router → + Thêm tài khoản AI**.
-2. Chọn **Nhà cung cấp**. Tên và địa chỉ API được điền sẵn.
+2. Chọn **Nhà cung cấp**. Tên và địa chỉ API được điền sẵn; khung **Cách lấy API key** hiện từng bước cho nhà cung cấp đó, kèm nút **Mở trang lấy key ↗** và lưu ý về chi phí/riêng tư.
 3. Dán **API key**, bấm **Kiểm tra & lấy danh sách mô hình**:
    - nếu key sai, NetPulse báo ngay;
    - nếu đúng, ô **Mô hình** có gợi ý; chọn mô hình mạnh nhất có hỗ trợ gọi công cụ (tools / function calling).

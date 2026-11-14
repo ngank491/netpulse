@@ -286,3 +286,15 @@ func TestZaloChannel(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d: %v", replies, bot.sent)
 	}
 }
+
+func TestHelpEndpoint(t *testing.T) {
+	h := newHarness(t)
+	if code := h.call("GET", "/api/help", nil, nil); code != 401 {
+		t.Fatalf("guide must require login, got %d", code)
+	}
+	h.call("POST", "/api/setup", map[string]string{"code": "ABCD-EFGH", "username": "admin", "password": "0123456789"}, nil)
+	var out map[string]string
+	if code := h.call("GET", "/api/help", nil, &out); code != 200 || !strings.Contains(out["markdown"], "## 2. Thêm router MikroTik") || !strings.Contains(out["markdown"], "Tạo lệnh cấu hình router") {
+		t.Fatalf("help = %d %d bytes", code, len(out["markdown"]))
+	}
+}

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"netpulse/docs"
 )
 
 //go:embed web
@@ -64,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	user("GET /api/routers/{id}", s.routerDetail)
 	user("GET /api/routers/{id}/history", s.history)
 	user("GET /api/events", s.events)
+	user("GET /api/help", s.help)
 	user("GET /api/routers/{id}/audits", s.listAudits)
 	user("GET /api/audits/{aid}", s.getAudit)
 	admin("POST /api/admin/routers/{id}/audit", s.startAudit)
@@ -1162,6 +1165,11 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, u *User) {
 		}
 	}
 	writeJSON(w, 200, rep)
+}
+
+// help serves the embedded user guide (Markdown) to signed-in users.
+func (s *Server) help(w http.ResponseWriter, r *http.Request, u *User) {
+	writeJSON(w, 200, map[string]string{"markdown": docs.Guide, "version": Version})
 }
 
 // ---------- AI accounts ----------
