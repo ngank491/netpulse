@@ -298,6 +298,7 @@ function overviewPage() {
 
 function routerCard(r) {
   const res = r.resource || {};
+  r.wans = r.wans || []; r.downList = r.downList || [];
   const chips = r.wans.filter(w => w.configured || r.wans.every(x => !x.configured)).map(w => {
     const st = !w.configured ? (w.running ? 'up' : w.running === false ? 'down' : '') : (w.link.status === 'down' || w.inet.status === 'down') ? 'down' : w.inet.status === 'up' || (w.link.status === 'up' && w.inet.status === 'unknown') ? 'up' : '';
     return h('span', { class: 'chip ' + st, title: w.iface }, (st === 'down' ? '✕ ' : st === 'up' ? '✓ ' : '') + (w.label || w.iface));
@@ -354,6 +355,9 @@ function routerPage(id, tab) {
     load: () => api('GET', `/api/routers/${id}`),
     update(d) {
       view = d.router;
+      // tolerate missing collections (new router, no devices yet, no data yet)
+      view.ifaces = view.ifaces || []; view.monitors = view.monitors || []; view.sections = view.sections || {};
+      view.wans = view.wans || []; view.detectedWans = view.detectedWans || []; view.downList = view.downList || [];
       const res = view.resource || {};
       fill(head, h('div', { class: 'rhead' },
         h('span', { class: 'dot ' + view.status }), h('h1', null, view.name), badge(view.status),

@@ -188,7 +188,21 @@ func friendlyNetErr(err error) error {
 		return errors.New("router từ chối kết nối (dịch vụ www/www-ssl chưa bật hoặc sai cổng)")
 	case strings.Contains(err.Error(), "no route to host"), strings.Contains(err.Error(), "network is unreachable"):
 		return errors.New("không có đường tới router")
-	case strings.Contains(err.Error(), "tls:"), strings.Contains(err.Error(), "x509:"):
+	}
+	// Drop the long request URL from the message; keep the cause.
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "handshake failure"), strings.Contains(msg, "internal error"):
+		return errors.New("router từ chối HTTPS: www-ssl chưa có chứng chỉ dùng được (kiểm tra /certificate đã sign và /ip service www-ssl certificate=...)")
+	case strings.Contains(msg, "server gave HTTP response"):
+		return errors.New("cổng này là HTTP, không phải HTTPS: bỏ chọn “Dùng HTTPS” hoặc đổi cổng")
+	case strings.Contains(msg, "x509:"):
+		return fmt.Errorf("chứng chỉ router không hợp lệ (bỏ chọn “Kiểm tra chứng chỉ” nếu dùng chứng chỉ tự ký): %v", err)
+	case strings.Contains(msg, "tls:"):
 		return fmt.Errorf("lỗi HTTPS: %v", err)
 	}
 	return err

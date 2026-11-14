@@ -987,10 +987,10 @@ type RouterView struct {
 	MonitorsTotal int              `json:"monitorsTotal"`
 	MonitorsDown  int              `json:"monitorsDown"`
 	DownList      []string         `json:"downList"`
-	Ifaces        []Iface          `json:"ifaces,omitempty"`
-	Monitors      []MonitorView    `json:"monitors,omitempty"`
-	Sections      map[string][]Row `json:"sections,omitempty"`
-	SectionAt     map[string]int64 `json:"sectionAt,omitempty"`
+	Ifaces        []Iface          `json:"ifaces"`
+	Monitors      []MonitorView    `json:"monitors"`
+	Sections      map[string][]Row `json:"sections"`
+	SectionAt     map[string]int64 `json:"sectionAt"`
 	MapX          *float64         `json:"mapX"`
 	MapY          *float64         `json:"mapY"`
 }

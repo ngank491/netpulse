@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -445,5 +446,54 @@ func TestInstallerQuoting(t *testing.T) {
 	}
 	if !strings.Contains(s, "http://10.0.0.2:8080/api/push/1") {
 		t.Fatal("url missing")
+	}
+}
+
+func TestFriendlyTLSError(t *testing.T) {
+	// Mimic RouterOS www-ssl without a usable certificate: answer the
+	// ClientHello with a fatal TLS alert "handshake_failure" (40).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 4096)
+			c.Read(buf)
+			c.Write([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28})
+			c.Close()
+		}
+	}()
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	src := newRestSource(&Router{Host: host, Port: atoi(port, 0), TLS: true}, "x")
+	_, err = src.Fetch(context.Background(), "/system/resource", resourceProps)
+	if err == nil || !strings.Contains(err.Error(), "www-ssl chưa có chứng chỉ") || strings.Contains(err.Error(), "proplist") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A new router without devices or data must still send empty collections,
+// the UI calls .map/.filter on them.
+func TestEmptyRouterViewJSON(t *testing.T) {
+	h := newHarness(t)
+	h.call("POST", "/api/setup", map[string]string{"code": "ABCD-EFGH", "username": "admin", "password": "0123456789"}, nil)
+	var rt Router
+	h.call("POST", "/api/admin/routers", map[string]any{"name": "Empty", "mode": "push", "enabled": true}, &rt)
+	req, _ := http.NewRequest("GET", h.web.URL+"/api/routers/"+itoa(uint64(rt.ID)), nil)
+	resp, err := h.c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{`"monitors":[]`, `"ifaces":[]`, `"sections":{}`, `"wans":[]`, `"downList":[]`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("missing %s in %s", want, body)
+		}
 	}
 }
