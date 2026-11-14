@@ -86,6 +86,11 @@ func (d *demoSource) Fetch(ctx context.Context, path string, _ []string) ([]Row,
 		return []Row{{"interface": "ether1", "status": "bound", "address": "192.168.1.50/24", "gateway": "192.168.1.1", "add-default-route": "yes"}}, nil
 	case "/ppp/active", "/system/health":
 		return nil, errNotSupported
+	case "/interface/bridge/host":
+		return []Row{{"mac-address": "DC:A6:32:00:10:00", "on-interface": "ether3", "bridge": "bridge-lan"},
+			{"mac-address": "DC:A6:32:00:20:01", "on-interface": "ether4", "bridge": "bridge-lan"}}, nil
+	case "/ip/dns/static":
+		return []Row{{"name": "nas.vanphong.lan", "address": "192.168.88.10"}}, nil
 	case "/interface/list/member":
 		return []Row{{"list": "WAN", "interface": "ether1"}, {"list": "WAN", "interface": "pppoe-vnpt"}}, nil
 	case "/ip/neighbor":

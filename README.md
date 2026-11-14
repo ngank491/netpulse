@@ -14,7 +14,7 @@ Chạy trên Windows, Linux, macOS, Raspberry Pi, Docker và Home Assistant OS.
 - **Sơ đồ mạng kéo thả**: nút đổi màu theo trạng thái, có nút ảo cho switch không quản lý được, nút "Tự sắp xếp".
 - **Biểu đồ lịch sử** lưu lượng theo interface, CPU và RAM: 1 giờ đến 30 ngày.
 - **Client**: gộp DHCP lease và ARP; phiên PPPoE; địa chỉ IP, route mặc định, neighbor.
-- **Cảnh báo Telegram**
+- **Cảnh báo Telegram và Zalo**
   - Không báo động giả: chỉ báo mất kết nối sau 2 lần kiểm tra liên tiếp thất bại; lỗi chạy lệnh ping không được tính.
   - Không mất tin: cảnh báo được ghi vào database trước khi gửi, rồi gửi lại khi có mạng (giữ tối đa 24 giờ). Nhiều cảnh báo xảy ra cùng lúc được gộp thành một tin.
   - Kênh quản trị nhận mọi cảnh báo; mỗi router có thể có nhóm Telegram riêng.
@@ -22,6 +22,8 @@ Chạy trên Windows, Linux, macOS, Raspberry Pi, Docker và Home Assistant OS.
   - Bot trả lời `/status` (xem tình trạng) và `/start` hoặc `/id` (cho biết Chat ID).
 - **Phân quyền**: quản trị viên và người xem. Người xem chỉ thấy các router được giao và bị chặn ở cả giao diện lẫn API.
 - **Sao lưu một chạm** khi đang chạy (bản sao database nhất quán).
+
+📘 **Hướng dẫn chi tiết thêm router, Telegram và Zalo: [docs/HUONG-DAN.md](docs/HUONG-DAN.md)**
 
 ## So với repo NetWatch gốc
 

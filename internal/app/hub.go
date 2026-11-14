@@ -93,7 +93,14 @@ type RState struct {
 	SectionAt map[string]int64
 	Probes    map[int64]*ProbeState
 	WANs      map[string]*WanState
+	IfLinks   map[string]*ProbeState // link state of every port (events)
+	WanIPs    map[string]string      // last public IP per WAN interface
+	Version   string                 // last RouterOS version seen
+	Uptime    float64                // last uptime seen (reboot detection)
+	Clients   map[string]*Client     // by MAC
 
+	aliases          map[string]string
+	clientsReady     bool
 	prevBytes        map[string][2]uint64
 	prevAt           int64
 	prevUptime       float64
@@ -109,21 +116,26 @@ type RState struct {
 }
 
 type persisted struct {
-	Conn      ProbeState            `json:"conn"`
-	LastSeen  int64                 `json:"lastSeen"`
-	LastErr   string                `json:"lastErr"`
-	Identity  string                `json:"identity"`
-	Resource  Row                   `json:"resource"`
-	Ifaces    []Iface               `json:"ifaces"`
-	Sections  map[string][]Row      `json:"sections"`
-	SectionAt map[string]int64      `json:"sectionAt"`
-	Probes    map[int64]*ProbeState `json:"probes"`
-	WANs      map[string]*WanState  `json:"wans"`
+	Conn      ProbeState             `json:"conn"`
+	LastSeen  int64                  `json:"lastSeen"`
+	LastErr   string                 `json:"lastErr"`
+	Identity  string                 `json:"identity"`
+	Resource  Row                    `json:"resource"`
+	Ifaces    []Iface                `json:"ifaces"`
+	Sections  map[string][]Row       `json:"sections"`
+	SectionAt map[string]int64       `json:"sectionAt"`
+	Probes    map[int64]*ProbeState  `json:"probes"`
+	WANs      map[string]*WanState   `json:"wans"`
+	IfLinks   map[string]*ProbeState `json:"ifLinks"`
+	WanIPs    map[string]string      `json:"wanIps"`
+	Version   string                 `json:"version"`
+	Uptime    float64                `json:"uptime"`
 }
 
 func newRState(r Router, mons []Monitor) *RState {
 	return &RState{id: r.ID, cfg: r, monitors: mons, Conn: *newProbe(), Sections: map[string][]Row{}, SectionAt: map[string]int64{},
-		Probes: map[int64]*ProbeState{}, WANs: map[string]*WanState{}, push: map[string]*pushBuf{}}
+		Probes: map[int64]*ProbeState{}, WANs: map[string]*WanState{}, push: map[string]*pushBuf{},
+		IfLinks: map[string]*ProbeState{}, WanIPs: map[string]string{}, Clients: map[string]*Client{}, aliases: map[string]string{}}
 }
 
 func (rs *RState) restore(b []byte) {
@@ -144,6 +156,13 @@ func (rs *RState) restore(b []byte) {
 	if p.WANs != nil {
 		rs.WANs = p.WANs
 	}
+	if p.IfLinks != nil {
+		rs.IfLinks = p.IfLinks
+	}
+	if p.WanIPs != nil {
+		rs.WanIPs = p.WanIPs
+	}
+	rs.Version, rs.Uptime = p.Version, p.Uptime
 	// Rates from before the restart are meaningless.
 	for i := range rs.Ifaces {
 		rs.Ifaces[i].RxBps, rs.Ifaces[i].TxBps = nil, nil
@@ -153,7 +172,8 @@ func (rs *RState) restore(b []byte) {
 
 // snapshotLocked must be called with rs.mu held.
 func (rs *RState) snapshotLocked() []byte {
-	b, _ := json.Marshal(persisted{rs.Conn, rs.LastSeen, rs.LastErr, rs.Identity, rs.Resource, rs.Ifaces, rs.Sections, rs.SectionAt, rs.Probes, rs.WANs})
+	b, _ := json.Marshal(persisted{rs.Conn, rs.LastSeen, rs.LastErr, rs.Identity, rs.Resource, rs.Ifaces, rs.Sections, rs.SectionAt, rs.Probes, rs.WANs,
+		rs.IfLinks, rs.WanIPs, rs.Version, rs.Uptime})
 	return b
 }
 
@@ -252,6 +272,8 @@ type Hub struct {
 	notify   *Notifier
 	demo     bool
 
+	resolver *resolver
+
 	ctl sync.Mutex // serialises Reload/Remove
 	mu  sync.RWMutex
 	rs  map[int64]*RState
@@ -260,7 +282,7 @@ type Hub struct {
 }
 
 func NewHub(st *Store, box *Box, settings *SettingsStore, demo bool) *Hub {
-	return &Hub{st: st, box: box, settings: settings, demo: demo, rs: map[int64]*RState{}}
+	return &Hub{st: st, box: box, settings: settings, demo: demo, rs: map[int64]*RState{}, resolver: newResolver()}
 }
 
 func (h *Hub) Start(ctx context.Context) error {
@@ -273,11 +295,24 @@ func (h *Hub) Start(ctx context.Context) error {
 		if err := h.load(r); err != nil {
 			return err
 		}
+		if rs := h.get(r.ID); rs != nil && r.Enabled && rs.LastSeen > 0 {
+			// explains gaps in charts and history after an update or reboot of the server
+			gap := nowMs() - rs.LastSeen
+			msg := "NetPulse " + Version + " khởi động, tiếp tục giám sát"
+			if gap > 2*60_000 {
+				msg += " (đã gián đoạn " + humanDur(gap) + ")"
+			}
+			h.st.AddEvent(r.ID, nowMs(), "info", msg)
+		}
 	}
-	h.wg.Add(1)
+	h.wg.Add(2)
 	go func() {
 		defer h.wg.Done()
 		h.housekeeping(ctx)
+	}()
+	go func() {
+		defer h.wg.Done()
+		h.runResolver(ctx)
 	}()
 	return nil
 }
@@ -334,6 +369,9 @@ func (h *Hub) load(r *Router) error {
 		return err
 	} else if b != nil {
 		rs.restore(b)
+	}
+	if err := h.loadClients(rs); err != nil {
+		return err
 	}
 	h.mu.Lock()
 	h.rs[r.ID] = rs
@@ -503,6 +541,7 @@ func (h *Hub) pollOnce(ctx context.Context, rs *RState, src Source, lastSlow, la
 			}
 			h.observeSection(rs, sec.Name, rows, nowMs())
 		}
+		h.updateClients(rs, nowMs())
 	}
 	if time.Since(*lastProbe) >= 29*time.Second {
 		*lastProbe = time.Now()
@@ -585,14 +624,15 @@ func (h *Hub) observeFailure(rs *RState, msg string, now int64) {
 		rs.dirty = true
 	}
 	h.finish(rs, &eff, now)
-	id, name, chat := rs.cfg.ID, rs.cfg.Name, rs.cfg.ChatID
+	cfg := rs.cfg
 	rs.mu.Unlock()
-	h.apply(id, name, chat, eff)
+	h.apply(cfg, eff)
 }
 
 func (h *Hub) observeFast(rs *RState, res Row, ifs []Row, now int64) {
 	var eff effects
 	rs.mu.Lock()
+	prevSeen := rs.LastSeen
 	rs.LastSeen, rs.LastErr = now, ""
 	downSince := rs.Conn.Since
 	if rs.Conn.step(true, false, now, -1, 3) == "up" && rs.Conn.Alerted {
@@ -631,6 +671,8 @@ func (h *Hub) observeFast(rs *RState, res Row, ifs []Row, now int64) {
 	if res != nil {
 		rs.Resource = cleanRows([]Row{res}, resourceProps)[0]
 	}
+	h.lifecycleEvents(rs, &eff, res, uptime, prevSeen, now)
+	h.portEvents(rs, &eff, list, now)
 
 	for _, w := range rs.cfg.WANs {
 		var it *Iface
@@ -668,9 +710,9 @@ func (h *Hub) observeFast(rs *RState, res Row, ifs []Row, now int64) {
 	}
 	eff.sample = rs.acc.add(now, cpuP, memP, list)
 	h.finish(rs, &eff, now)
-	id, name, chat := rs.cfg.ID, rs.cfg.Name, rs.cfg.ChatID
+	cfg := rs.cfg
 	rs.mu.Unlock()
-	h.apply(id, name, chat, eff)
+	h.apply(cfg, eff)
 }
 
 func (h *Hub) observeSection(rs *RState, name string, rows []Row, now int64) {
@@ -684,7 +726,14 @@ func (h *Hub) observeSection(rs *RState, name string, rows []Row, now int64) {
 	if name == "identity" && len(rows) > 0 {
 		rs.Identity = rows[0]["name"]
 	}
+	var eff effects
+	if name == "address" {
+		h.wanIPEvents(rs, &eff, now)
+	}
+	h.finish(rs, &eff, now)
+	cfg := rs.cfg
 	rs.mu.Unlock()
+	h.apply(cfg, eff)
 }
 
 func (h *Hub) observeProbes(rs *RState, mons map[int64]probeOut, wans map[string]probeOut, now int64) {
@@ -738,12 +787,13 @@ func (h *Hub) observeProbes(rs *RState, mons map[int64]probeOut, wans map[string
 		}
 	}
 	h.finish(rs, &eff, now)
-	id, name, chat := rs.cfg.ID, rs.cfg.Name, rs.cfg.ChatID
+	cfg := rs.cfg
 	rs.mu.Unlock()
-	h.apply(id, name, chat, eff)
+	h.apply(cfg, eff)
 }
 
-func (h *Hub) apply(id int64, name, chat string, eff effects) {
+func (h *Hub) apply(cfg Router, eff effects) {
+	id, name := cfg.ID, cfg.Name
 	for _, a := range eff.alerts {
 		if a.event {
 			if err := h.st.AddEvent(id, a.at, a.level, a.msg); err != nil {
@@ -751,7 +801,7 @@ func (h *Hub) apply(id int64, name, chat string, eff effects) {
 			}
 		}
 		if a.notify && h.notify != nil {
-			h.notify.Alert(chat, a.icon+" ["+name+"] "+a.msg)
+			h.notify.Alert(Targets{cfg.ChatID, cfg.ZaloChat}, a.icon+" ["+name+"] "+a.msg)
 		}
 	}
 	if s := eff.sample; s != nil {
@@ -834,13 +884,13 @@ func (h *Hub) tick(now int64) {
 		}
 		h.finish(rs, &eff, now)
 		rs.mu.Unlock()
-		h.apply(cfg.ID, cfg.Name, cfg.ChatID, eff)
+		h.apply(cfg, eff)
 	}
 }
 
 func (h *Hub) maybeSummary(t time.Time) {
 	s := h.settings.Get()
-	if !s.SummaryOn || h.notify == nil {
+	if !s.SummaryOn || h.notify == nil || (s.AdminChat == "" && s.ZaloAdmin == "" && !h.anyRouterChat()) {
 		return
 	}
 	local := t.In(h.settings.Loc())
@@ -858,17 +908,29 @@ func (h *Hub) maybeSummary(t time.Time) {
 	if local.Format("15:04") > addMinutes(s.SummaryAt, 30) {
 		return
 	}
-	if s.AdminChat != "" {
-		h.notify.Send(s.AdminChat, h.SummaryText(nil))
-	}
+	h.notify.ToAdmins(h.SummaryText(nil))
 	for _, rs := range h.all() {
 		rs.mu.RLock()
-		chat, id := rs.cfg.ChatID, rs.cfg.ID
+		t, id := Targets{rs.cfg.ChatID, rs.cfg.ZaloChat}, rs.id
 		rs.mu.RUnlock()
-		if chat != "" && chat != s.AdminChat {
-			h.notify.Send(chat, h.SummaryText(func(x int64) bool { return x == id }))
+		for _, c := range channels {
+			if chat := t.For(c.Name); chat != "" && chat != h.settings.AdminChat(c.Name) {
+				h.notify.Send(c.Name, chat, h.SummaryText(func(x int64) bool { return x == id }))
+			}
 		}
 	}
+}
+
+func (h *Hub) anyRouterChat() bool {
+	for _, rs := range h.all() {
+		rs.mu.RLock()
+		ok := rs.cfg.ChatID != "" || rs.cfg.ZaloChat != ""
+		rs.mu.RUnlock()
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 func addMinutes(hhmm string, n int) string {
@@ -966,6 +1028,7 @@ type WanView struct {
 	Inet       ProbeState `json:"inet"`
 	RxBps      *float64   `json:"rxBps"`
 	TxBps      *float64   `json:"txBps"`
+	PublicIP   string     `json:"publicIp"`
 }
 
 type RouterView struct {
@@ -987,6 +1050,9 @@ type RouterView struct {
 	MonitorsTotal int              `json:"monitorsTotal"`
 	MonitorsDown  int              `json:"monitorsDown"`
 	DownList      []string         `json:"downList"`
+	ClientsTotal  int              `json:"clientsTotal"`
+	ClientsOnline int              `json:"clientsOnline"`
+	Clients       []Client         `json:"clients"`
 	Ifaces        []Iface          `json:"ifaces"`
 	Monitors      []MonitorView    `json:"monitors"`
 	Sections      map[string][]Row `json:"sections"`
@@ -1054,6 +1120,7 @@ func (h *Hub) view(rs *RState, detail bool) RouterView {
 		if s := rs.WANs[iface]; s != nil && configured {
 			w.Link, w.Inet = s.Link, s.Inet
 		}
+		w.PublicIP = rs.WanIPs[iface]
 		return w
 	}
 	seen := map[string]bool{}
@@ -1081,7 +1148,17 @@ func (h *Hub) view(rs *RState, detail bool) RouterView {
 			}
 		}
 	}
+	for _, c := range rs.Clients {
+		if c.IP == "" {
+			continue
+		}
+		v.ClientsTotal++
+		if c.Online {
+			v.ClientsOnline++
+		}
+	}
 	if detail {
+		v.Clients = rs.clientList()
 		v.Ifaces = append([]Iface{}, rs.Ifaces...)
 		v.Sections, v.SectionAt = map[string][]Row{}, map[string]int64{}
 		for k, rows := range rs.Sections {

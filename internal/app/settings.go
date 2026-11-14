@@ -13,6 +13,9 @@ import (
 type Settings struct {
 	TGToken       string `json:"tgToken"` // sealed with Box
 	AdminChat     string `json:"adminChat"`
+	ZaloToken     string `json:"zaloToken"` // sealed with Box
+	ZaloAdmin     string `json:"zaloAdmin"`
+	NotifyNew     bool   `json:"notifyNew"` // alert when an unknown device joins
 	SummaryOn     bool   `json:"summaryOn"`
 	SummaryAt     string `json:"summaryAt"`
 	RepeatMin     int    `json:"repeatMin"` // reminders for WAN / router outages
@@ -61,25 +64,44 @@ func (s *SettingsStore) Loc() *time.Location {
 	return s.loc
 }
 
-// Token returns the decrypted Telegram bot token ("" when unset).
-func (s *SettingsStore) Token() string {
-	t, err := s.box.Open(s.Get().TGToken)
+// Token returns the decrypted bot token of a channel ("" when unset).
+func (s *SettingsStore) Token(channel string) string {
+	cur := s.Get()
+	sealed := cur.TGToken
+	if channel == "zalo" {
+		sealed = cur.ZaloToken
+	}
+	t, err := s.box.Open(sealed)
 	if err != nil {
 		return ""
 	}
 	return t
 }
 
+// AdminChat returns the admin chat of a channel.
+func (s *SettingsStore) AdminChat(channel string) string {
+	if channel == "zalo" {
+		return s.Get().ZaloAdmin
+	}
+	return s.Get().AdminChat
+}
+
 var (
 	reChat  = regexp.MustCompile(`^(-?\d{1,20}|@[A-Za-z0-9_]{4,64})$`)
 	reToken = regexp.MustCompile(`^\d{5,15}:[A-Za-z0-9_-]{30,64}$`)
-	reHHMM  = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
+	// Zalo bot tokens look like "12345689:abc-xyz"; chat IDs are opaque strings.
+	reZaloToken = regexp.MustCompile(`^\d{3,20}:[A-Za-z0-9_-]{8,200}$`)
+	reZaloChat  = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
+	reHHMM      = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
 )
 
 // SettingsInput is what the admin form sends. Token: nil = keep, "" = remove.
 type SettingsInput struct {
 	TGToken       *string `json:"tgToken"`
 	AdminChat     string  `json:"adminChat"`
+	ZaloToken     *string `json:"zaloToken"`
+	ZaloAdmin     string  `json:"zaloAdmin"`
+	NotifyNew     bool    `json:"notifyNew"`
 	SummaryOn     bool    `json:"summaryOn"`
 	SummaryAt     string  `json:"summaryAt"`
 	RepeatMin     int     `json:"repeatMin"`
@@ -90,6 +112,10 @@ type SettingsInput struct {
 
 func (s *SettingsStore) Update(in SettingsInput) error {
 	in.AdminChat = strings.TrimSpace(in.AdminChat)
+	in.ZaloAdmin = strings.TrimSpace(in.ZaloAdmin)
+	if in.ZaloAdmin != "" && !reZaloChat.MatchString(in.ZaloAdmin) {
+		return errors.New("Chat ID Zalo không hợp lệ")
+	}
 	in.PushBase = strings.TrimRight(strings.TrimSpace(in.PushBase), "/")
 	if in.AdminChat != "" && !reChat.MatchString(in.AdminChat) {
 		return errors.New("Chat ID không hợp lệ")
@@ -122,6 +148,14 @@ func (s *SettingsStore) Update(in SettingsInput) error {
 		}
 		next.TGToken = s.box.Seal(t)
 	}
+	if in.ZaloToken != nil {
+		t := strings.TrimSpace(*in.ZaloToken)
+		if t != "" && !reZaloToken.MatchString(t) {
+			return errors.New("Bot Token Zalo không đúng định dạng (12345:abc...)")
+		}
+		next.ZaloToken = s.box.Seal(t)
+	}
+	next.ZaloAdmin, next.NotifyNew = in.ZaloAdmin, in.NotifyNew
 	next.AdminChat, next.SummaryOn, next.SummaryAt = in.AdminChat, in.SummaryOn, in.SummaryAt
 	next.RepeatMin, next.Timezone, next.RetentionDays, next.PushBase = in.RepeatMin, in.Timezone, in.RetentionDays, in.PushBase
 	if err := s.st.SetJSON("settings", next); err != nil {

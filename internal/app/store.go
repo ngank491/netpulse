@@ -103,6 +103,23 @@ CREATE TABLE outbox(
 CREATE TABLE state(router_id INTEGER PRIMARY KEY, data TEXT NOT NULL);
 `
 
+// schemaV2: Zalo channel, client presence tracking and client aliases.
+const schemaV2 = `
+ALTER TABLE routers ADD COLUMN zalo_chat TEXT NOT NULL DEFAULT '';
+ALTER TABLE outbox ADD COLUMN channel TEXT NOT NULL DEFAULT 'telegram';
+CREATE TABLE clients(
+  router_id INTEGER NOT NULL REFERENCES routers(id) ON DELETE CASCADE,
+  mac TEXT NOT NULL,
+  data TEXT NOT NULL,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY(router_id, mac)) WITHOUT ROWID;
+CREATE TABLE client_alias(
+  router_id INTEGER NOT NULL REFERENCES routers(id) ON DELETE CASCADE,
+  mac TEXT NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY(router_id, mac)) WITHOUT ROWID;
+`
+
 type Store struct{ db *sql.DB }
 
 func OpenStore(path string) (*Store, error) {
@@ -133,7 +150,7 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return err
 	}
-	migrations := []string{schemaV1}
+	migrations := []string{schemaV1, schemaV2}
 	if v > len(migrations) {
 		return fmt.Errorf("database được tạo bởi phiên bản mới hơn (schema %d)", v)
 	}
@@ -388,6 +405,7 @@ type Router struct {
 	WANs      []WAN    `json:"wans"`
 	WANTarget string   `json:"wanTarget"`
 	ChatID    string   `json:"chatId"`
+	ZaloChat  string   `json:"zaloChat"`
 	Enabled   bool     `json:"enabled"`
 	MapX      *float64 `json:"mapX"`
 	MapY      *float64 `json:"mapY"`
@@ -398,7 +416,7 @@ type Router struct {
 	pushToken   string
 }
 
-const routerCols = "id,name,mode,host,port,tls,verify_tls,username,secret,push_token,interval_s,wans,wan_target,chat_id,enabled,map_x,map_y"
+const routerCols = "id,name,mode,host,port,tls,verify_tls,username,secret,push_token,interval_s,wans,wan_target,chat_id,enabled,map_x,map_y,zalo_chat"
 
 type scanner interface{ Scan(...any) error }
 
@@ -407,7 +425,7 @@ func scanRouter(sc scanner) (*Router, error) {
 	var wans string
 	var mx, my sql.NullFloat64
 	err := sc.Scan(&r.ID, &r.Name, &r.Mode, &r.Host, &r.Port, &r.TLS, &r.VerifyTLS, &r.Username, &r.secret,
-		&r.pushToken, &r.Interval, &wans, &r.WANTarget, &r.ChatID, &r.Enabled, &mx, &my)
+		&r.pushToken, &r.Interval, &wans, &r.WANTarget, &r.ChatID, &r.Enabled, &mx, &my, &r.ZaloChat)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -449,9 +467,9 @@ func (s *Store) GetRouter(id int64) (*Router, error) {
 func (s *Store) SaveRouter(r *Router) error {
 	wans, _ := json.Marshal(r.WANs)
 	if r.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO routers(name,mode,host,port,tls,verify_tls,username,secret,interval_s,wans,wan_target,chat_id,enabled,created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.Name, r.Mode, r.Host, r.Port, r.TLS, r.VerifyTLS, r.Username, r.secret,
-			r.Interval, string(wans), r.WANTarget, r.ChatID, r.Enabled, nowMs())
+		res, err := s.db.Exec(`INSERT INTO routers(name,mode,host,port,tls,verify_tls,username,secret,interval_s,wans,wan_target,chat_id,enabled,created_at,zalo_chat)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.Name, r.Mode, r.Host, r.Port, r.TLS, r.VerifyTLS, r.Username, r.secret,
+			r.Interval, string(wans), r.WANTarget, r.ChatID, r.Enabled, nowMs(), r.ZaloChat)
 		if err != nil {
 			return err
 		}
@@ -459,8 +477,8 @@ func (s *Store) SaveRouter(r *Router) error {
 		return err
 	}
 	_, err := s.db.Exec(`UPDATE routers SET name=?,mode=?,host=?,port=?,tls=?,verify_tls=?,username=?,secret=?,interval_s=?,wans=?,
-		wan_target=?,chat_id=?,enabled=? WHERE id=?`, r.Name, r.Mode, r.Host, r.Port, r.TLS, r.VerifyTLS, r.Username, r.secret,
-		r.Interval, string(wans), r.WANTarget, r.ChatID, r.Enabled, r.ID)
+		wan_target=?,chat_id=?,enabled=?,zalo_chat=? WHERE id=?`, r.Name, r.Mode, r.Host, r.Port, r.TLS, r.VerifyTLS, r.Username, r.secret,
+		r.Interval, string(wans), r.WANTarget, r.ChatID, r.Enabled, r.ZaloChat, r.ID)
 	return err
 }
 
@@ -728,20 +746,21 @@ func (s *Store) Availability(routerID, since int64) (map[int64]float64, error) {
 
 type OutMsg struct {
 	ID       int64
+	Channel  string
 	Chat     string
 	Text     string
 	Created  int64
 	Attempts int
 }
 
-func (s *Store) Enqueue(chat, text string) error {
+func (s *Store) Enqueue(channel, chat, text string) error {
 	t := nowMs()
-	_, err := s.db.Exec("INSERT INTO outbox(chat_id,text,created_at,next_at) VALUES(?,?,?,?)", chat, text, t, t)
+	_, err := s.db.Exec("INSERT INTO outbox(channel,chat_id,text,created_at,next_at) VALUES(?,?,?,?,?)", channel, chat, text, t, t)
 	return err
 }
 
 func (s *Store) DueOutbox(now int64, limit int) ([]OutMsg, error) {
-	rows, err := s.db.Query("SELECT id,chat_id,text,created_at,attempts FROM outbox WHERE next_at<=? ORDER BY id LIMIT ?", now, limit)
+	rows, err := s.db.Query("SELECT id,channel,chat_id,text,created_at,attempts FROM outbox WHERE next_at<=? ORDER BY id LIMIT ?", now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -749,7 +768,7 @@ func (s *Store) DueOutbox(now int64, limit int) ([]OutMsg, error) {
 	var out []OutMsg
 	for rows.Next() {
 		var m OutMsg
-		if err := rows.Scan(&m.ID, &m.Chat, &m.Text, &m.Created, &m.Attempts); err != nil {
+		if err := rows.Scan(&m.ID, &m.Channel, &m.Chat, &m.Text, &m.Created, &m.Attempts); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -815,6 +834,7 @@ func (s *Store) Purge(before int64) error {
 		"DELETE FROM events WHERE at<?",
 		"DELETE FROM probe_hourly WHERE hour<?",
 		"DELETE FROM sessions WHERE expires_at<?",
+		"DELETE FROM clients WHERE last_seen<?",
 	} {
 		arg := before
 		if strings.Contains(q, "sessions") {
@@ -831,5 +851,80 @@ func (s *Store) Purge(before int64) error {
 // Backup writes a consistent copy of the database to path.
 func (s *Store) Backup(path string) error {
 	_, err := s.db.Exec("VACUUM INTO ?", path)
+	return err
+}
+
+// ---------- clients (presence) & aliases ----------
+
+func (s *Store) LoadClients(routerID int64) ([][]byte, error) {
+	rows, err := s.db.Query("SELECT data FROM clients WHERE router_id=?", routerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out [][]byte
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		out = append(out, []byte(d))
+	}
+	return out, rows.Err()
+}
+
+type clientRow struct {
+	mac      string
+	data     []byte
+	lastSeen int64
+}
+
+func (s *Store) SaveClients(routerID int64, rows []clientRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	st, err := tx.Prepare(`INSERT INTO clients(router_id,mac,data,last_seen) VALUES(?,?,?,?)
+		ON CONFLICT(router_id,mac) DO UPDATE SET data=excluded.data,last_seen=excluded.last_seen`)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	for _, r := range rows {
+		if _, err := st.Exec(routerID, r.mac, string(r.data), r.lastSeen); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) LoadAliases(routerID int64) (map[string]string, error) {
+	rows, err := s.db.Query("SELECT mac,name FROM client_alias WHERE router_id=?", routerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var m, n string
+		if err := rows.Scan(&m, &n); err != nil {
+			return nil, err
+		}
+		out[m] = n
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetAlias(routerID int64, mac, name string) error {
+	if name == "" {
+		_, err := s.db.Exec("DELETE FROM client_alias WHERE router_id=? AND mac=?", routerID, mac)
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO client_alias(router_id,mac,name) VALUES(?,?,?)
+		ON CONFLICT(router_id,mac) DO UPDATE SET name=excluded.name`, routerID, mac, name)
 	return err
 }

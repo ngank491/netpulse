@@ -80,7 +80,8 @@ func (s *Server) Handler() http.Handler {
 	admin("DELETE /api/admin/users/{uid}", s.deleteUser)
 	admin("GET /api/admin/settings", s.getSettings)
 	admin("PUT /api/admin/settings", s.putSettings)
-	admin("POST /api/admin/settings/telegram-test", s.testTelegram)
+	admin("POST /api/admin/settings/test", s.testChannel)
+	admin("PUT /api/admin/routers/{id}/clients/{mac}/name", s.setClientName)
 	admin("GET /api/admin/backup", s.backup)
 
 	sub, _ := fs.Sub(webFS, "web")
@@ -571,12 +572,14 @@ type routerInput struct {
 	WANs      []WAN   `json:"wans"`
 	WANTarget string  `json:"wanTarget"`
 	ChatID    string  `json:"chatId"`
+	ZaloChat  string  `json:"zaloChat"`
 	Enabled   bool    `json:"enabled"`
 }
 
 func (s *Server) applyRouter(r *Router, in routerInput) error {
 	in.Name, in.Host, in.Username = strings.TrimSpace(in.Name), strings.TrimSpace(in.Host), strings.TrimSpace(in.Username)
 	in.ChatID = strings.TrimSpace(in.ChatID)
+	in.ZaloChat = strings.TrimSpace(in.ZaloChat)
 	if n := len([]rune(in.Name)); n < 1 || n > 64 {
 		return errors.New("tên router 1–64 ký tự")
 	}
@@ -628,11 +631,15 @@ func (s *Server) applyRouter(r *Router, in routerInput) error {
 	if ip := net.ParseIP(in.WANTarget); ip == nil {
 		return errors.New("IP kiểm tra Internet không hợp lệ")
 	}
+	if in.ZaloChat != "" && !reZaloChat.MatchString(in.ZaloChat) {
+		return errors.New("Chat ID Zalo của router không hợp lệ")
+	}
 	if in.ChatID != "" && !reChat.MatchString(in.ChatID) {
 		return errors.New("Chat ID nhóm không hợp lệ")
 	}
 	r.Name, r.Mode, r.Host, r.Port, r.TLS, r.VerifyTLS, r.Username = in.Name, in.Mode, in.Host, in.Port, in.TLS, in.VerifyTLS, in.Username
 	r.Interval, r.WANs, r.WANTarget, r.ChatID, r.Enabled = in.Interval, in.WANs, in.WANTarget, in.ChatID, in.Enabled
+	r.ZaloChat = in.ZaloChat
 	if r.WANs == nil {
 		r.WANs = []WAN{}
 	}
@@ -1029,10 +1036,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, u *User) {
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request, u *User) {
 	cur := s.settings.Get()
-	hasToken := cur.TGToken != ""
-	cur.TGToken = ""
-	writeJSON(w, 200, map[string]any{"settings": cur, "hasToken": hasToken, "tokenOk": s.settings.Token() != "" || !hasToken,
-		"telegramError": s.n.LastError(), "version": Version, "dataDir": s.cfg.DataDir})
+	has := map[string]bool{"telegram": cur.TGToken != "", "zalo": cur.ZaloToken != ""}
+	ok := map[string]bool{}
+	for ch, h := range has {
+		ok[ch] = !h || s.settings.Token(ch) != ""
+	}
+	cur.TGToken, cur.ZaloToken = "", ""
+	writeJSON(w, 200, map[string]any{"settings": cur, "hasToken": has, "tokenOk": ok, "errors": s.n.LastErrors(),
+		"recentChats": s.n.Recent(), "version": Version, "dataDir": s.cfg.DataDir})
 }
 
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request, u *User) {
@@ -1047,21 +1058,47 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request, u *User) {
 	s.getSettings(w, r, u)
 }
 
-func (s *Server) testTelegram(w http.ResponseWriter, r *http.Request, u *User) {
+func (s *Server) testChannel(w http.ResponseWriter, r *http.Request, u *User) {
 	var in struct {
-		Chat string `json:"chat"`
+		Channel string `json:"channel"`
+		Chat    string `json:"chat"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
 	chat := strings.TrimSpace(in.Chat)
 	if chat == "" {
-		chat = s.settings.Get().AdminChat
+		chat = s.settings.AdminChat(in.Channel)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	if err := s.n.Test(ctx, chat); err != nil {
+	if err := s.n.Test(ctx, in.Channel, chat); err != nil {
 		errJSON(w, 502, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) setClientName(w http.ResponseWriter, r *http.Request, u *User) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	mac := normMAC(r.PathValue("mac"))
+	name := strings.TrimSpace(in.Name)
+	if mac == "" || len([]rune(name)) > 64 {
+		errJSON(w, 400, "MAC hoặc tên không hợp lệ (tên tối đa 64 ký tự)")
+		return
+	}
+	id := pathID(r, "id")
+	if _, err := s.st.GetRouter(id); err != nil {
+		serverErr(w, err)
+		return
+	}
+	if err := s.hub.SetAlias(id, mac, name); err != nil {
+		serverErr(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})

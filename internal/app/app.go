@@ -238,7 +238,7 @@ func Run(ctx context.Context, cfg *Config) error {
 		return err
 	}
 	go notifier.Run(runCtx)
-	go notifier.RunBot(runCtx)
+	go notifier.RunBots(runCtx)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,

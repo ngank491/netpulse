@@ -181,6 +181,10 @@ func (h *Hub) pushSection(rs *RState, m *pushMsg, now int64) error {
 	delete(rs.push, m.Name)
 	rs.mu.Unlock()
 	h.observeSection(rs, m.Name, all, now)
+	switch m.Name {
+	case "lease", "arp", "bridge_host", "dns_static", "neighbor":
+		h.updateClients(rs, now) // presence is time-based, so partial rounds are fine
+	}
 	return nil
 }
 
@@ -204,6 +208,8 @@ var pushCommands = []struct{ name, cmd string }{
 	{"address", "/ip address print as-value"},
 	{"lease", "/ip dhcp-server lease print as-value"},
 	{"arp", "/ip arp print as-value"},
+	{"bridge_host", "/interface bridge host print as-value"},
+	{"dns_static", "/ip dns static print as-value"},
 	{"route", "/ip route print as-value where dst-address=0.0.0.0/0"},
 	{"pppoe_client", "/interface pppoe-client print as-value"},
 	{"dhcp_client", "/ip dhcp-client print as-value"},

@@ -311,12 +311,12 @@ function routerCard(r) {
     chips.length ? h('div', { class: 'chips' }, chips) : null,
     r.downList.length ? h('ul', { class: 'downlist' }, r.downList.slice(0, 4).map(x => h('li', null, '● ' + x))) : null,
     h('div', { class: 'rc-foot' },
-      h('span', null, r.monitorsTotal ? `Thiết bị: ${r.monitorsTotal - r.monitorsDown}/${r.monitorsTotal} hoạt động` : 'Chưa theo dõi thiết bị'),
+      h('span', null, (r.monitorsTotal ? `Thiết bị: ${r.monitorsTotal - r.monitorsDown}/${r.monitorsTotal}` : 'Chưa theo dõi thiết bị') + (r.clientsTotal ? ` · Client: ${r.clientsOnline}/${r.clientsTotal}` : '')),
       h('span', null, res.uptime ? 'Uptime ' + fmtDur(rosSec(res.uptime)) : ago(r.lastSeen))));
 }
 
 function eventList(events, names) {
-  if (!events.length) return h('div', { class: 'empty' }, 'Chưa có sự kiện');
+  if (!events.length) return h('div', { class: 'empty' }, EV_EMPTY);
   return h('div', { class: 'tw' }, h('table', null, h('tbody', null, events.map(e => h('tr', null,
     h('td', { class: 'nowrap muted small' }, fmtTime(e.at)),
     names ? h('td', { class: 'nowrap' }, h('a', { href: `#/r/${e.routerId}/events` }, names[e.routerId] || '#' + e.routerId)) : null,
@@ -324,17 +324,38 @@ function eventList(events, names) {
 }
 
 // ---------- events page ----------
+const EV_EMPTY = 'Chưa có sự kiện. Sự kiện được ghi khi router mất/có kết nối, WAN hoặc cổng đổi trạng thái, thiết bị theo dõi lỗi, router khởi động lại, IP WAN đổi hoặc có thiết bị mới vào mạng.';
+function eventsPanel(title, key, withRouter) {
+  const levelSel = h('select', { class: 'search' }, h('option', { value: '' }, 'Mọi mức'), h('option', { value: 'warning' }, 'Cảnh báo'), h('option', { value: 'info' }, 'Thông tin'));
+  const p = tablePanel(title, key, levelSel);
+  let last = null;
+  levelSel.addEventListener('change', () => last && p.draw(...last));
+  const draw = (events, names) => {
+    const rows = levelSel.value ? events.filter(e => e.level === levelSel.value) : events;
+    const cols = [
+      { t: 'Thời gian', v: e => e.at, r: e => h('span', { class: 'nowrap small' }, fmtTime(e.at)) },
+      withRouter ? { t: 'Router', v: e => names[e.routerId] || '', r: e => h('a', { href: `#/r/${e.routerId}/events` }, names[e.routerId] || '#' + e.routerId) } : null,
+      { t: 'Mức', v: e => e.level, r: e => badge(e.level === 'warning' ? 'down' : 'up', e.level === 'warning' ? 'Cảnh báo' : 'Thông tin') },
+      { t: 'Nội dung', v: e => e.msg },
+    ].filter(Boolean);
+    last = [cols, rows, { empty: EV_EMPTY }];
+    if (p.state.sort == null) { p.state.sort = 0; p.state.desc = true; }
+    p.draw(...last);
+  };
+  return { el: p.el, draw };
+}
+
 function eventsPage() {
-  let box, names = {};
+  let panel, names = {};
   return {
     every: 10000,
-    mount(main) { box = h('div'); main.append(h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Nhật ký sự kiện')), box)); },
+    mount(main) { panel = eventsPanel('Nhật ký sự kiện', 'events-all', true); main.append(panel.el); },
     async load() {
-      const [ov, ev] = await Promise.all([api('GET', '/api/overview'), api('GET', '/api/events?limit=500')]);
+      const [ov, ev] = await Promise.all([api('GET', '/api/overview'), api('GET', '/api/events?limit=1000')]);
       names = Object.fromEntries(ov.routers.map(r => [r.id, r.name]));
       return ev;
     },
-    update(ev) { fill(box, eventList(ev, names)); },
+    update(ev) { panel.draw(ev, names); },
   };
 }
 
@@ -357,7 +378,7 @@ function routerPage(id, tab) {
       view = d.router;
       // tolerate missing collections (new router, no devices yet, no data yet)
       view.ifaces = view.ifaces || []; view.monitors = view.monitors || []; view.sections = view.sections || {};
-      view.wans = view.wans || []; view.detectedWans = view.detectedWans || []; view.downList = view.downList || [];
+      view.wans = view.wans || []; view.detectedWans = view.detectedWans || []; view.downList = view.downList || []; view.clients = view.clients || [];
       const res = view.resource || {};
       fill(head, h('div', { class: 'rhead' },
         h('span', { class: 'dot ' + view.status }), h('h1', null, view.name), badge(view.status),
@@ -367,8 +388,9 @@ function routerPage(id, tab) {
         me.role === 'admin' ? h('a', { class: 'btn', href: `#/admin/routers?edit=${id}` }, 'Cấu hình') : null),
         view.lastErr && view.status !== 'up' ? h('div', { class: 'err-line' }, view.lastErr) : null);
       const down = view.monitorsDown, wanDown = view.wans.filter(w => w.configured && (w.inet.status === 'down' || w.link.status === 'down')).length;
-      const counts = { devices: [view.monitorsTotal, down], wan: [view.wans.length, wanDown], clients: [mergeClients(view.sections).length, 0], ppp: [(view.sections.ppp_active || []).length, 0] };
+      const counts = { devices: [view.monitorsTotal, down], wan: [view.wans.length, wanDown], clients: [view.clientsTotal, 0], ppp: [(view.sections.ppp_active || []).length, 0] };
       fill(tabsEl, TABS.map(([k, label]) => h('a', { href: `#/r/${id}/${k}`, class: k === tab ? 'on' : null }, label,
+        k === 'clients' && view.clientsTotal ? h('span', { class: 'n', title: 'đang hoạt động / tổng' }, view.clientsOnline + '/' + view.clientsTotal) :
         counts[k] && counts[k][0] ? h('span', { class: 'n ' + (counts[k][1] ? 'bad' : '') }, counts[k][1] ? counts[k][1] + '/' + counts[k][0] : counts[k][0]) : null)));
       t.update(view);
     },
@@ -454,6 +476,7 @@ function tabWan(id) {
         { t: 'Ping', num: true, v: w => w.inet.rtt, r: w => w.inet.rtt > 0 ? w.inet.rtt.toFixed(1) + ' ms' : '–' },
         { t: 'Vào', num: true, v: w => w.rxBps, r: w => fmtBps(w.rxBps) },
         { t: 'Ra', num: true, v: w => w.txBps, r: w => fmtBps(w.txBps) },
+        { t: 'IP public', v: w => w.publicIp, r: w => h('span', { class: 'mono small' }, w.publicIp || '–') },
         { t: 'Từ lúc', v: w => w.inet.since, r: w => w.configured && w.inet.since ? since(w.inet.since) : '–' },
       ], v.wans, { empty: 'Không phát hiện WAN nào', rowClass: w => w.configured ? null : 'off' });
       fill(note, v.wans.some(w => !w.configured) ?
@@ -485,7 +508,7 @@ function tabDevices(id) {
         { t: 'Sẵn sàng 24h', num: true, v: m => m.avail24, r: m => m.avail24 == null ? '–' : m.avail24.toFixed(m.avail24 === 100 ? 0 : 2) + '%' },
         { t: 'Từ lúc', v: m => m.state?.since, r: m => m.state?.since ? since(m.state.since) : '–' },
         { t: 'Nối với', v: parentName },
-        { t: 'Báo Telegram', v: m => m.notify ? 1 : 0, r: m => m.kind === 'virtual' ? '–' : m.notify ? (m.repeatMin ? `Có, nhắc ${m.repeatMin}′` : 'Có') : 'Không' },
+        { t: 'Cảnh báo', v: m => m.notify ? 1 : 0, r: m => m.kind === 'virtual' ? '–' : m.notify ? (m.repeatMin ? `Có, nhắc ${m.repeatMin}′` : 'Có') : 'Không' },
       ];
       if (me.role === 'admin') cols.push({ t: '', r: m => h('div', { class: 'row' }, h('button', { class: 'sm', onclick: () => monitorForm(id, view, m) }, 'Sửa')) });
       p.draw(cols, v.monitors, { empty: me.role === 'admin' ? 'Chưa có thiết bị. Bấm “Thêm thiết bị” hoặc chọn từ danh sách DHCP.' : 'Chưa có thiết bị', rowClass: m => m.enabled ? null : 'off' });
@@ -525,7 +548,7 @@ function monitorForm(routerId, view, m) {
   } });
   modal(isNew ? 'Thêm thiết bị' : 'Sửa thiết bị', h('div', { class: 'form' },
     field('Tên hiển thị', name), field('Địa chỉ IP', ip), field('Loại', kind), field('Nối với (trên sơ đồ)', parent),
-    h('div', { class: 'full row' }, check('Ping định kỳ', enabled), check('Báo Telegram khi mất kết nối', notify)), field('Khi vẫn chưa khắc phục', repeat),
+    h('div', { class: 'full row' }, check('Ping định kỳ', enabled), check('Báo khi mất kết nối (Telegram/Zalo)', notify)), field('Khi vẫn chưa khắc phục', repeat),
     h('p', { class: 'hint full' }, 'Router ping 2 gói mỗi 30 giây. Thiết bị chỉ bị báo mất kết nối sau 2 lần liên tiếp không phản hồi; lỗi chạy lệnh ping không được tính.')), actions);
 }
 
@@ -533,7 +556,7 @@ function suggestForm(routerId, view) {
   const have = new Set(view.monitors.map(m => m.ip));
   const items = [];
   for (const n of view.sections.neighbor || []) if (n.address && !have.has(n.address)) items.push({ name: n.identity || n.board || n.address, ip: n.address, kind: /CRS|CSS|switch/i.test(n.board || '') ? 'switch' : /cAP|wAP|hAP|AP/i.test(n.board || '') ? 'ap' : 'device', src: 'neighbor ' + (n.platform || '') });
-  for (const c of mergeClients(view.sections)) if (!have.has(c.ip) && !items.some(i => i.ip === c.ip)) items.push({ name: c.host || c.ip, ip: c.ip, kind: 'device', src: c.dhcp ? 'DHCP' : 'ARP' });
+  for (const c of view.clients) if (c.ip && !have.has(c.ip) && !items.some(i => i.ip === c.ip)) items.push({ name: c.name || (c.vendor ? c.vendor + ' ' + c.ip : c.ip), ip: c.ip, kind: 'device', src: (c.online ? 'đang hoạt động · ' : '') + (c.vendor || NAME_SRC[c.nameSrc] || '') });
   const boxes = items.map(i => ({ i, cb: h('input', { type: 'checkbox' }) }));
   modal('Thêm thiết bị từ dữ liệu router', boxes.length ? h('div', { class: 'tw' }, h('table', null, h('tbody', null, boxes.map(({ i, cb }) => h('tr', null,
     h('td', null, cb), h('td', null, i.name), h('td', { class: 'mono' }, i.ip), h('td', { class: 'muted small' }, i.src)))))) :
@@ -671,40 +694,63 @@ function tabPorts(id) {
 }
 
 // --- clients tab
-function mergeClients(sec) {
-  const m = new Map();
-  for (const l of sec.lease || []) {
-    const ip = l['active-address'] || l.address; if (!ip) continue;
-    m.set(ip, { ip, mac: l['active-mac-address'] || l['mac-address'] || '', host: l['host-name'] || l.comment || '', dhcp: l.status || '', server: l.server || '', iface: '', arp: '', lastSeen: l['last-seen'] || '' });
-  }
-  for (const a of sec.arp || []) {
-    if (!a.address) continue;
-    const c = m.get(a.address) || { ip: a.address, mac: '', host: '', dhcp: '', server: '', lastSeen: '' };
-    c.mac = c.mac || a['mac-address'] || ''; c.iface = a.interface || ''; c.arp = a.status || (truthy(a.complete) ? 'complete' : '');
-    m.set(a.address, c);
-  }
-  return [...m.values()].sort((a, b) => ipKey(a.ip) - ipKey(b.ip));
+const NAME_SRC = { alias: 'tự đặt', device: 'thiết bị theo dõi', dhcp: 'DHCP', comment: 'ghi chú router', dns: 'DNS tĩnh', neighbor: 'neighbor', netbios: 'NetBIOS', mdns: 'mDNS', rdns: 'DNS ngược' };
+
+function clientName(c) {
+  if (c.name) return h('div', null, h('b', null, c.name), h('div', { class: 'muted small' }, [NAME_SRC[c.nameSrc] || c.nameSrc, c.vendor].filter(Boolean).join(' · ')));
+  return h('div', null, h('span', { class: 'muted' }, c.vendor ? 'Thiết bị ' + c.vendor : c.randomMac ? 'MAC ngẫu nhiên' : 'Không rõ tên'),
+    h('div', { class: 'muted small' }, c.randomMac ? 'điện thoại/laptop dùng địa chỉ riêng tư' : 'chưa dò được tên'));
+}
+
+function clientTime(c) {
+  if (c.online) return h('div', null, h('b', null, fmtDur((Date.now() - c.since) / 1000)), h('div', { class: 'muted small' }, 'từ ' + fmtTime(c.since)));
+  if (!c.since) return h('span', { class: 'muted small' }, 'chưa thấy hoạt động');
+  return h('div', null, 'dừng ' + fmtTime(c.since), h('div', { class: 'muted small' }, fmtDur((Date.now() - c.since) / 1000) + ' trước' + (c.lastSession > 0 ? ' · phiên trước ' + fmtDur(c.lastSession / 1000) : '')));
+}
+
+function clientNameForm(routerId, c) {
+  const name = h('input', { value: c.nameSrc === 'alias' ? c.name : '', placeholder: c.name || 'ví dụ: Camera cổng, PC kế toán', maxlength: 64 });
+  modal('Đặt tên cho ' + c.mac, h('div', { class: 'stack' }, field('Tên hiển thị (để trống = dùng tên tự dò)', name),
+    h('p', { class: 'hint' }, `IP ${c.ip}${c.vendor ? ' · ' + c.vendor : ''}. Tên gắn với địa chỉ MAC nên vẫn đúng khi IP thay đổi.`)),
+    [{ t: 'Huỷ', fn: x => x() }, { t: 'Lưu', cls: 'primary', submit: true, fn: async close => {
+      try { await api('PUT', `/api/admin/routers/${routerId}/clients/${encodeURIComponent(c.mac)}/name`, { name: name.value }); close(); toast('Đã lưu tên', 'ok'); refresh(); }
+      catch (e) { toast(e.message, 'bad'); }
+    } }]);
 }
 
 function tabClients(id) {
-  let p, view;
+  let p, view, filter = ui.clientFilter || 'all';
+  const seg = h('div', { class: 'seg' });
+  const filters = [['all', 'Tất cả'], ['online', 'Đang hoạt động'], ['offline', 'Ngừng'], ['noname', 'Chưa có tên']];
+  const drawSeg = () => fill(seg, filters.map(([k, t]) => h('button', { type: 'button', class: filter === k ? 'on' : null, onclick: () => { filter = ui.clientFilter = k; drawSeg(); render(); } }, t)));
+  const render = () => {
+    if (!view) return;
+    const watched = new Set(view.monitors.map(m => m.ip));
+    const rows = view.clients.filter(c => filter === 'online' ? c.online : filter === 'offline' ? !c.online : filter === 'noname' ? !c.name : true);
+    const cols = [
+      { t: 'Trạng thái', v: c => c.online ? 1 : 0, r: c => c.online ? badge('up', 'Hoạt động') : badge(c.since ? 'down' : 'unknown', c.since ? 'Ngừng' : 'Chưa rõ') },
+      { t: 'Tên máy', v: c => (c.name || '~' + (c.vendor || '')) + ' ' + c.mac + ' ' + (c.host || ''), r: clientName },
+      { t: 'IP', v: c => ipKey(c.ip), r: c => h('span', { class: 'mono' }, c.ip) },
+      { t: 'MAC', v: c => c.mac, r: c => h('div', null, h('span', { class: 'mono small' }, c.mac), c.randomMac ? h('div', { class: 'muted small' }, 'ngẫu nhiên') : null) },
+      { t: 'Thời gian hoạt động / dừng', v: c => (c.online ? 1e15 : 0) + (c.online ? -c.since : c.since), r: clientTime },
+      { t: 'Cổng', v: c => c.port || c.iface, r: c => c.port ? h('span', null, c.port, c.iface && c.iface !== c.port ? h('div', { class: 'muted small' }, c.iface) : null) : c.iface || '–' },
+      { t: 'DHCP', v: c => c.dhcp, r: c => c.dhcp ? badge(c.dhcp === 'bound' ? 'up' : 'unknown', c.dhcp) : h('span', { class: 'muted small' }, 'IP tĩnh') },
+      { t: 'Lần đầu thấy', v: c => c.firstSeen, r: c => h('span', { class: 'small' }, fmtTime(c.firstSeen)) },
+    ];
+    if (me.role === 'admin') cols.push({ t: '', r: c => h('div', { class: 'row' },
+      h('button', { class: 'sm', title: 'Đặt tên', onclick: () => clientNameForm(id, c) }, 'Đặt tên'),
+      watched.has(c.ip) ? null : h('button', { class: 'sm', title: 'Ping định kỳ và báo khi mất kết nối', onclick: () => monitorForm(id, view, { name: c.name || c.ip, ip: c.ip }) }, '+ Theo dõi')) });
+    p.draw(cols, rows, { empty: 'Chưa có dữ liệu client (cập nhật mỗi phút).', rowClass: c => c.online ? null : 'off' });
+  };
   return {
-    mount(el) { p = tablePanel('Client (DHCP + ARP)', 'clients'); el.append(p.el); },
-    update(v) {
-      view = v;
-      const watched = new Set(v.monitors.map(m => m.ip));
-      const cols = [
-        { t: 'IP', v: c => ipKey(c.ip), r: c => h('span', { class: 'mono' }, c.ip) },
-        { t: 'Tên máy', v: c => c.host },
-        { t: 'MAC', v: c => c.mac, r: c => h('span', { class: 'mono small' }, c.mac) },
-        { t: 'DHCP', v: c => c.dhcp, r: c => c.dhcp ? badge(c.dhcp === 'bound' ? 'up' : 'unknown', c.dhcp) : '–' },
-        { t: 'ARP', v: c => c.arp, r: c => c.arp ? badge(['reachable', 'permanent', 'complete'].includes(c.arp) ? 'up' : c.arp === 'failed' ? 'down' : 'unknown', c.arp) : '–' },
-        { t: 'Interface', v: c => c.iface || c.server },
-        { t: 'Thấy lần cuối', v: c => rosSec(c.lastSeen), r: c => c.lastSeen ? fmtDur(rosSec(c.lastSeen)) + ' trước' : '–' },
-      ];
-      if (me.role === 'admin') cols.push({ t: '', r: c => watched.has(c.ip) ? h('span', { class: 'muted small' }, 'đang theo dõi') : h('button', { class: 'sm', onclick: () => monitorForm(id, view, { name: c.host || c.ip, ip: c.ip }) }, '+ Theo dõi') });
-      p.draw(cols, mergeClients(v.sections), { empty: 'Chưa có dữ liệu DHCP/ARP (cập nhật mỗi phút).' });
+    mount(el) {
+      drawSeg();
+      p = tablePanel('Client', 'clients-' + id, seg);
+      if (p.state.sort == null) { p.state.sort = 0; p.state.desc = true; }
+      el.append(h('div', { class: 'stack' }, p.el, h('p', { class: 'hint' },
+        'Hoạt động = router thấy gói tin từ thiết bị trong 5 phút gần nhất (bảng bridge host/ARP). Tên máy lấy theo thứ tự: tên tự đặt → thiết bị theo dõi → DHCP → ghi chú → DNS tĩnh → neighbor → NetBIOS/mDNS/DNS ngược (NetPulse hỏi trực tiếp thiết bị). Nếu vẫn không có, hiện hãng sản xuất theo MAC.')));
     },
+    update(v) { view = v; render(); },
   };
 }
 
@@ -772,13 +818,13 @@ function tabIp(id) {
 
 // --- events tab
 function tabEvents(id) {
-  let box, last = 0;
+  let panel, last = 0;
   return {
-    mount(el) { box = h('div'); el.append(h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Sự kiện của router')), box)); },
+    mount(el) { panel = eventsPanel('Sự kiện của router', 'events-' + id, false); el.append(panel.el); },
     async update() {
       if (Date.now() - last < 10000) return;
       last = Date.now();
-      try { fill(box, eventList(await api('GET', `/api/events?router=${id}&limit=300`))); } catch (e) { toast(e.message, 'bad'); }
+      try { panel.draw(await api('GET', `/api/events?router=${id}&limit=1000`), {}); } catch (e) { toast(e.message, 'bad'); }
     },
   };
 }
@@ -895,6 +941,7 @@ function routerForm(r, view) {
   const interval = h('input', { type: 'number', min: 5, max: 300, value: r.interval || 15 });
   const target = h('input', { value: r.wanTarget || '8.8.8.8', class: 'mono' });
   const chat = h('input', { value: r.chatId || '', placeholder: '-100123456789 (tuỳ chọn)', class: 'mono' });
+  const zchat = h('input', { value: r.zaloChat || '', placeholder: 'Chat ID Zalo (tuỳ chọn)', class: 'mono' });
   const enabled = h('input', { type: 'checkbox', checked: isNew ? true : r.enabled });
   const ifList = h('datalist', { id: 'np-ifaces' });
   const known = new Set([...(view?.wans || []).map(w => w.iface)]);
@@ -934,7 +981,7 @@ function routerForm(r, view) {
   mode.addEventListener('change', syncMode); syncMode();
   function collect() {
     const body = { name: name.value, mode: mode.value, host: host.value, port: +port.value || 0, tls: tls.checked, verifyTls: verify.checked, username: user.value,
-      interval: +interval.value || 15, wans: [...wanRows.children].map(x => x._get()).filter(w => w.iface), wanTarget: target.value, chatId: chat.value, enabled: enabled.checked };
+      interval: +interval.value || 15, wans: [...wanRows.children].map(x => x._get()).filter(w => w.iface), wanTarget: target.value, chatId: chat.value, zaloChat: zchat.value, enabled: enabled.checked };
     if (pass.value) body.password = pass.value;
     return body;
   }
@@ -951,7 +998,7 @@ function routerForm(r, view) {
   } });
   modal(isNew ? 'Thêm router' : 'Sửa router: ' + r.name, h('div', { class: 'form' },
     field('Tên hiển thị', name), field('Cách kết nối', mode, 'full'), pullBox, pushNote,
-    field('Chu kỳ đọc (giây)', interval), field('IP kiểm tra Internet', target), field('Chat ID nhóm Telegram riêng', chat),
+    field('Chu kỳ đọc (giây)', interval), field('IP kiểm tra Internet', target), field('Chat ID Telegram riêng cho router này', chat), field('Chat ID Zalo riêng cho router này', zchat),
     h('div', { class: 'full stack' }, h('h3', null, 'WAN cần theo dõi'),
       h('p', { class: 'hint' }, 'NetPulse báo khi WAN mất link hoặc mất Internet (ping IP kiểm tra qua đúng interface đó). Với PPPoE, chọn interface pppoe-out.'),
       wanRows, ifList,
@@ -1032,35 +1079,73 @@ function userForm(u, routers) {
 
 // ---------- admin: settings ----------
 function settingsPage() {
-  let box;
+  let box, built = false, recentBox = h('div'), inputs = {};
+  const CH = [
+    { k: 'telegram', title: 'Telegram', tokenKey: 'tgToken', chatKey: 'adminChat', tokenPh: '123456789:AA…', how: 'Tạo bot bằng @BotFather trong Telegram, dán Bot Token vào đây và Lưu. Sau đó nhắn /start cho bot (hoặc thêm bot vào nhóm rồi gõ /id). Chat ID sẽ hiện ở bảng “Tin nhắn gần đây” bên dưới.' },
+    { k: 'zalo', title: 'Zalo', tokenKey: 'zaloToken', chatKey: 'zaloAdmin', tokenPh: '12345678:abc-xyz…', how: 'Trong Zalo, tìm OA “Zalo Bot Manager” → Tạo bot → đặt tên bắt đầu bằng “Bot”. Zalo gửi Bot Token cho bạn; dán vào đây và Lưu. Sau đó mở bot, nhắn “id”. Chat ID sẽ hiện ở bảng “Tin nhắn gần đây”.' },
+  ];
   return {
+    every: 15000,
     mount(main) { box = h('div'); main.append(box); },
     load: () => api('GET', '/api/admin/settings'),
     update(d) {
+      const useChat = (ch, id) => { inputs[ch].chat.value = id; inputs[ch].chat.focus(); toast('Đã điền Chat ID – bấm “Lưu cài đặt”', 'ok'); };
+      const recent = d.recentChats || [];
+      fill(recentBox, recent.length ? table([
+        { t: 'Kênh', v: x => x.channel, r: x => x.channel === 'zalo' ? 'Zalo' : 'Telegram' },
+        { t: 'Người gửi / nhóm', v: x => x.name, r: x => h('div', null, x.name || '–', x.kind ? h('div', { class: 'muted small' }, x.kind) : null) },
+        { t: 'Chat ID', v: x => x.chatId, r: x => h('span', { class: 'mono' }, x.chatId) },
+        { t: 'Tin nhắn', v: x => x.text },
+        { t: 'Lúc', v: x => x.at, r: x => fmtTime(x.at) },
+        { t: '', r: x => h('button', { type: 'button', class: 'sm', onclick: () => useChat(x.channel, x.chatId) }, 'Dùng làm Chat ID quản trị') },
+      ], recent) : h('div', { class: 'empty' }, 'Chưa có. Lưu Bot Token rồi nhắn bất kỳ tin nào cho bot (ví dụ “id”); bảng tự cập nhật sau vài giây.'));
+      if (built) return; // periodic refresh only updates the table above, never the form being edited
+      built = true;
       const st = d.settings;
-      const token = h('input', { type: 'password', autocomplete: 'off', placeholder: d.hasToken ? '(đã lưu – để trống để giữ nguyên)' : '123456789:AA…' });
-      const removeTok = h('input', { type: 'checkbox' });
-      const chat = h('input', { value: st.adminChat, placeholder: 'Chat ID cá nhân hoặc nhóm quản trị', class: 'mono' });
+      inputs = {};
+      const chPanel = c => {
+        const token = h('input', { type: 'password', autocomplete: 'off', placeholder: d.hasToken[c.k] ? '(đã lưu – để trống để giữ nguyên)' : c.tokenPh });
+        const remove = h('input', { type: 'checkbox' });
+        const chat = h('input', { value: st[c.chatKey] || '', placeholder: 'Chat ID nhận mọi cảnh báo', class: 'mono' });
+        inputs[c.k] = { token, remove, chat };
+        const err = d.errors[c.k];
+        return h('div', { class: 'panel' },
+          h('div', { class: 'panel-h' }, h('h2', null, 'Cảnh báo ' + c.title), d.hasToken[c.k] ? badge(d.tokenOk[c.k] ? 'up' : 'down', d.tokenOk[c.k] ? 'Đã có Bot Token' : 'Không giải mã được token') : badge('unknown', 'Chưa cấu hình'), err ? h('span', { class: 'st down' }, err) : null),
+          h('div', { class: 'panel-b form' },
+            field('Bot Token', token), field('Chat ID quản trị', chat),
+            d.hasToken[c.k] ? h('div', { class: 'full' }, check('Xoá Bot Token đã lưu', remove)) : null,
+            h('div', { class: 'full row' }, h('button', { type: 'button', onclick: e => busy(e.target, async () => {
+              await api('POST', '/api/admin/settings/test', { channel: c.k, chat: chat.value }); toast('Đã gửi tin thử qua ' + c.title + ' – kiểm tra điện thoại', 'ok');
+            }) }, 'Gửi tin thử'), h('span', { class: 'hint' }, 'Lưu cài đặt trước khi gửi thử.')),
+            h('p', { class: 'hint full' }, c.how)));
+      };
       const sumOn = h('input', { type: 'checkbox', checked: st.summaryOn });
       const sumAt = h('input', { type: 'time', value: st.summaryAt });
+      const notifyNew = h('input', { type: 'checkbox', checked: st.notifyNew });
       const repeat = h('select', null, [[0, 'Không nhắc lại'], [15, '15 phút'], [30, '30 phút'], [60, '1 giờ'], [120, '2 giờ']].map(([v, t]) => h('option', { value: v, selected: st.repeatMin === v }, t)));
       const tz = h('input', { value: st.timezone });
       const keep = h('input', { type: 'number', min: 1, max: 400, value: st.retentionDays });
       const base = h('input', { value: st.pushBase, placeholder: 'http://192.168.1.10:8080', class: 'mono' });
       const save = h('button', { class: 'primary', type: 'submit' }, 'Lưu cài đặt');
+      const recentPanel = h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Tin nhắn gần đây gửi tới bot'), h('span', { class: 'muted small' }, 'dùng để lấy Chat ID')), recentBox);
       const form = h('form', { class: 'stack', onsubmit: e => { e.preventDefault(); busy(save, async () => {
-        const body = { adminChat: chat.value, summaryOn: sumOn.checked, summaryAt: sumAt.value, repeatMin: +repeat.value, timezone: tz.value, retentionDays: +keep.value, pushBase: base.value };
-        if (removeTok.checked) body.tgToken = ''; else if (token.value) body.tgToken = token.value;
-        page.update(await api('PUT', '/api/admin/settings', body)); toast('Đã lưu cài đặt', 'ok');
+        const body = { adminChat: inputs.telegram.chat.value, zaloAdmin: inputs.zalo.chat.value, summaryOn: sumOn.checked, summaryAt: sumAt.value, notifyNew: notifyNew.checked,
+          repeatMin: +repeat.value, timezone: tz.value, retentionDays: +keep.value, pushBase: base.value };
+        for (const c of CH) {
+          const i = inputs[c.k];
+          if (i.remove.checked) body[c.tokenKey] = ''; else if (i.token.value) body[c.tokenKey] = i.token.value;
+        }
+        const res = await api('PUT', '/api/admin/settings', body);
+        built = false; page.update(res); toast('Đã lưu cài đặt', 'ok');
       }); } },
-        h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Cảnh báo Telegram'), d.telegramError ? h('span', { class: 'st down' }, d.telegramError) : null),
+        h('div', { class: 'grid two' }, chPanel(CH[0]), chPanel(CH[1])),
+        recentPanel,
+        h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Khi nào gửi cảnh báo')),
           h('div', { class: 'panel-b form' },
-            field('Bot Token (tạo bằng @BotFather)', token), field('Chat ID quản trị (nhận mọi cảnh báo)', chat),
-            d.hasToken ? h('div', { class: 'full' }, check('Xoá Bot Token đã lưu', removeTok)) : null,
             h('div', { class: 'full row' }, check('Gửi bản tin tổng hợp hằng ngày lúc', sumOn), h('div', null, sumAt)),
             field('Nhắc lại khi WAN/router vẫn lỗi', repeat),
-            h('div', { class: 'full row' }, h('button', { type: 'button', onclick: e => busy(e.target, async () => { await api('POST', '/api/admin/settings/telegram-test', { chat: chat.value }); toast('Đã gửi tin thử – kiểm tra Telegram', 'ok'); }) }, 'Gửi tin thử'),
-              h('span', { class: 'hint' }, 'Chưa biết Chat ID? Lưu Bot Token, nhắn /start cho bot (hoặc thêm bot vào nhóm và gõ /id) – bot sẽ trả lời Chat ID. Gõ /status để xem tình trạng bất cứ lúc nào.')))),
+            h('div', { class: 'full' }, check('Báo khi có thiết bị lạ lần đầu vào mạng', notifyNew)),
+            h('p', { class: 'hint full' }, 'Cảnh báo gửi tới Chat ID quản trị của mọi kênh đã cấu hình, và tới Chat ID riêng của từng router (nếu có). Gõ /status (Telegram) hoặc “status” (Zalo) cho bot để xem tình trạng bất cứ lúc nào.'))),
         h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Hệ thống')),
           h('div', { class: 'panel-b form' },
             field('Múi giờ', tz), field('Số ngày lưu lịch sử', keep),
@@ -1069,7 +1154,7 @@ function settingsPage() {
         h('div', { class: 'row' }, save));
       const backup = h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Sao lưu')),
         h('div', { class: 'panel-b stack' },
-          h('p', null, 'Tải bản sao database (đã nhất quán, an toàn khi đang chạy). Để khôi phục: dừng NetPulse, chép file vào ', h('code', null, d.dataDir + '/netpulse.db'), ' và giữ nguyên file ', h('code', null, 'secret.key'), ' (dùng để giải mã mật khẩu router và Bot Token).'),
+          h('p', null, 'Tải bản sao database (nhất quán, an toàn khi đang chạy). Để khôi phục: dừng NetPulse, chép file vào ', h('code', null, d.dataDir + '/netpulse.db'), ' và giữ nguyên file ', h('code', null, 'secret.key'), ' (dùng để giải mã mật khẩu router và Bot Token).'),
           h('div', null, h('a', { class: 'btn', href: '/api/admin/backup' }, 'Tải bản sao lưu')),
           h('p', { class: 'hint' }, `NetPulse ${d.version}`)));
       fill(box, h('div', { class: 'stack' }, form, backup));

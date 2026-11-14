@@ -50,7 +50,9 @@ var resourceProps = []string{"uptime", "version", "board-name", "architecture-na
 var sections = []section{
 	{"address", "/ip/address", []string{"address", "network", "interface", "disabled", "dynamic", "invalid", "comment"}},
 	{"lease", "/ip/dhcp-server/lease", []string{"address", "active-address", "mac-address", "active-mac-address", "host-name", "server", "status", "last-seen", "expires-after", "dynamic", "disabled", "comment"}},
-	{"arp", "/ip/arp", []string{"address", "mac-address", "interface", "status", "dynamic", "complete", "invalid"}},
+	{"arp", "/ip/arp", []string{"address", "mac-address", "interface", "status", "dynamic", "complete", "invalid", "comment"}},
+	{"bridge_host", "/interface/bridge/host", []string{"mac-address", "on-interface", "bridge", "local", "external", "dynamic"}},
+	{"dns_static", "/ip/dns/static", []string{"name", "address", "type", "disabled"}},
 	{"route", "/ip/route?dst-address=0.0.0.0/0", []string{"dst-address", "gateway", "immediate-gw", "distance", "active", "disabled", "dynamic", "routing-table", "comment"}},
 	{"pppoe_client", "/interface/pppoe-client", []string{"name", "interface", "running", "disabled", "add-default-route"}},
 	{"dhcp_client", "/ip/dhcp-client", []string{"interface", "status", "address", "gateway", "disabled", "add-default-route"}},
