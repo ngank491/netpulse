@@ -11,27 +11,30 @@ import (
 
 // Settings are global, admin-editable options stored in the kv table.
 type Settings struct {
-	TGToken       string `json:"tgToken"` // sealed with Box
-	AdminChat     string `json:"adminChat"`
-	ZaloToken     string `json:"zaloToken"` // sealed with Box
-	ZaloAdmin     string `json:"zaloAdmin"`
-	NotifyNew     bool   `json:"notifyNew"` // alert when an unknown device joins
-	SummaryOn     bool   `json:"summaryOn"`
-	SummaryAt     string `json:"summaryAt"`
-	RepeatMin     int    `json:"repeatMin"` // reminders for WAN / router outages
-	Timezone      string `json:"timezone"`
-	RetentionDays int    `json:"retentionDays"`
-	PushBase      string `json:"pushBase"`
-	AIKey         string `json:"aiKey"` // Anthropic API key, sealed with Box
-	AIModel       string `json:"aiModel"`
-	AIConsent     bool   `json:"aiConsent"`   // admin agreed to send (redacted) router config to Anthropic
-	AIAnonymize   bool   `json:"aiAnonymize"` // replace public IPs/MACs with placeholders
-	AutoAudit     bool   `json:"autoAudit"`   // weekly audit on Sunday morning
+	TGToken       string       `json:"tgToken"` // sealed with Box
+	AdminChat     string       `json:"adminChat"`
+	ZaloToken     string       `json:"zaloToken"` // sealed with Box
+	ZaloAdmin     string       `json:"zaloAdmin"`
+	NotifyNew     bool         `json:"notifyNew"` // alert when an unknown device joins
+	SummaryOn     bool         `json:"summaryOn"`
+	SummaryAt     string       `json:"summaryAt"`
+	RepeatMin     int          `json:"repeatMin"` // reminders for WAN / router outages
+	Timezone      string       `json:"timezone"`
+	RetentionDays int          `json:"retentionDays"`
+	PushBase      string       `json:"pushBase"`
+	AIKey         string       `json:"aiKey,omitempty"`   // legacy (v0.3): migrated into AIProviders
+	AIModel       string       `json:"aiModel,omitempty"` // legacy (v0.3)
+	AIProviders   []AIProvider `json:"aiProviders"`
+	AIDefault     string       `json:"aiDefault"`
+	AIFallback    bool         `json:"aiFallback"`  // try other accounts when the chosen one fails
+	AIConsent     bool         `json:"aiConsent"`   // admin agreed to send (redacted) router config to Anthropic
+	AIAnonymize   bool         `json:"aiAnonymize"` // replace public IPs/MACs with placeholders
+	AutoAudit     bool         `json:"autoAudit"`   // weekly audit on Sunday morning
 }
 
 func defaultSettings() Settings {
 	return Settings{SummaryOn: true, SummaryAt: "08:00", RepeatMin: 30, Timezone: "Asia/Ho_Chi_Minh", RetentionDays: 30,
-		AIModel: "claude-opus-5-5", AIAnonymize: true}
+		AIAnonymize: true, AIFallback: true}
 }
 
 type SettingsStore struct {
@@ -48,6 +51,14 @@ func NewSettingsStore(st *Store, box *Box) (*SettingsStore, error) {
 		return nil, err
 	}
 	s.loc = loadLoc(s.cur.Timezone)
+	if s.cur.AIKey != "" && len(s.cur.AIProviders) == 0 { // v0.3 → multiple accounts
+		s.cur.AIProviders = []AIProvider{{ID: "claude", Name: "Claude (Anthropic)", Kind: "anthropic",
+			Model: firstNonEmpty(s.cur.AIModel, "claude-opus-5-5"), Key: s.cur.AIKey, Enabled: true}}
+		s.cur.AIDefault, s.cur.AIKey, s.cur.AIModel = "claude", "", ""
+		if err := st.SetJSON("settings", s.cur); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
 }
 
@@ -84,13 +95,195 @@ func (s *SettingsStore) Token(channel string) string {
 	return t
 }
 
-// AIKey returns the decrypted Anthropic API key ("" when unset).
-func (s *SettingsStore) AIKey() string {
-	k, err := s.box.Open(s.Get().AIKey)
+// ---------- AI accounts ----------
+
+// Providers returns the configured AI accounts without their keys.
+func (s *SettingsStore) Providers() []AIProvider {
+	cur := s.Get()
+	out := make([]AIProvider, len(cur.AIProviders))
+	for i, p := range cur.AIProviders {
+		p.Key = ""
+		out[i] = p
+	}
+	return out
+}
+
+func (s *SettingsStore) provider(id string) (AIProvider, bool) {
+	for _, p := range s.Get().AIProviders {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return AIProvider{}, false
+}
+
+func (s *SettingsStore) ProviderKey(id string) string {
+	p, ok := s.provider(id)
+	if !ok {
+		return ""
+	}
+	k, err := s.box.Open(p.Key)
 	if err != nil {
 		return ""
 	}
 	return k
+}
+
+// usable: enabled, and has a key unless it is a keyless local server.
+func (s *SettingsStore) usable(p AIProvider) bool {
+	return p.Enabled && p.Model != "" && (s.ProviderKey(p.ID) != "" || (p.Kind == "openai" && p.Key == ""))
+}
+
+// ProviderOrder returns the accounts to try: preferred (or default) first,
+// then the other usable accounts if fallback is enabled.
+func (s *SettingsStore) ProviderOrder(preferred string) []AIProvider {
+	cur := s.Get()
+	first := firstNonEmpty(preferred, cur.AIDefault)
+	var out []AIProvider
+	if p, ok := s.provider(first); ok && s.usable(p) {
+		out = append(out, p)
+	}
+	if len(out) == 0 || cur.AIFallback {
+		for _, p := range cur.AIProviders {
+			if p.ID != first && s.usable(p) {
+				out = append(out, p)
+				if !cur.AIFallback {
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// AIProviderInput is what the account form sends. Key: nil = keep, "" = none.
+type AIProviderInput struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Kind     string  `json:"kind"`
+	BaseURL  string  `json:"baseUrl"`
+	Model    string  `json:"model"`
+	Key      *string `json:"key"`
+	PriceIn  float64 `json:"priceIn"`
+	PriceOut float64 `json:"priceOut"`
+	Enabled  bool    `json:"enabled"`
+}
+
+var reModel = regexp.MustCompile(`^[A-Za-z0-9._:/@+-]{1,120}$`)
+
+// resolveProvider validates input and fills the stored key; it does not save.
+func (s *SettingsStore) resolveProvider(in AIProviderInput) (AIProvider, error) {
+	p := AIProvider{ID: in.ID, Name: strings.TrimSpace(in.Name), Kind: in.Kind, BaseURL: strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"),
+		Model: strings.TrimSpace(in.Model), PriceIn: in.PriceIn, PriceOut: in.PriceOut, Enabled: in.Enabled}
+	if n := len([]rune(p.Name)); n < 1 || n > 40 {
+		return p, errors.New("tên tài khoản 1–40 ký tự")
+	}
+	switch p.Kind {
+	case "anthropic":
+		p.BaseURL = ""
+		if p.Model == "" {
+			p.Model = "claude-opus-5-5"
+		}
+	case "openai":
+		u, err := url.Parse(p.BaseURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" {
+			return p, errors.New("địa chỉ API phải dạng https://…/v1")
+		}
+	default:
+		return p, errors.New("loại tài khoản không hợp lệ")
+	}
+	if p.Model != "" && !reModel.MatchString(p.Model) {
+		return p, errors.New("tên mô hình không hợp lệ")
+	}
+	if p.PriceIn < 0 || p.PriceOut < 0 || p.PriceIn > 1000 || p.PriceOut > 1000 {
+		return p, errors.New("giá không hợp lệ")
+	}
+	if old, ok := s.provider(p.ID); ok {
+		p.Key = old.Key
+	}
+	if in.Key != nil {
+		k := strings.TrimSpace(*in.Key)
+		if len(k) > 400 || strings.ContainsAny(k, " \t\r\n") {
+			return p, errors.New("API key không đúng định dạng")
+		}
+		p.Key = s.box.Seal(k)
+	}
+	if p.Kind == "anthropic" && p.Key == "" {
+		return p, errors.New("tài khoản Claude cần API key")
+	}
+	return p, nil
+}
+
+// SaveProvider creates or updates an account and returns it (without key).
+func (s *SettingsStore) SaveProvider(in AIProviderInput) (AIProvider, error) {
+	p, err := s.resolveProvider(in)
+	if err != nil {
+		return p, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.cur
+	next.AIProviders = append([]AIProvider{}, s.cur.AIProviders...)
+	found := false
+	for i := range next.AIProviders {
+		if next.AIProviders[i].ID == p.ID && p.ID != "" {
+			next.AIProviders[i], found = p, true
+		}
+	}
+	if !found {
+		if len(next.AIProviders) >= 12 {
+			return p, errors.New("tối đa 12 tài khoản AI")
+		}
+		p.ID = randomToken(4)
+		next.AIProviders = append(next.AIProviders, p)
+	}
+	if next.AIDefault == "" || len(next.AIProviders) == 1 {
+		next.AIDefault = p.ID
+	}
+	if err := s.st.SetJSON("settings", next); err != nil {
+		return p, err
+	}
+	s.cur = next
+	p.Key = ""
+	return p, nil
+}
+
+func (s *SettingsStore) DeleteProvider(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.cur
+	next.AIProviders = nil
+	for _, p := range s.cur.AIProviders {
+		if p.ID != id {
+			next.AIProviders = append(next.AIProviders, p)
+		}
+	}
+	if next.AIDefault == id {
+		next.AIDefault = ""
+		if len(next.AIProviders) > 0 {
+			next.AIDefault = next.AIProviders[0].ID
+		}
+	}
+	if err := s.st.SetJSON("settings", next); err != nil {
+		return err
+	}
+	s.cur = next
+	return nil
+}
+
+func (s *SettingsStore) SetDefaultProvider(id string) error {
+	if _, ok := s.provider(id); !ok {
+		return ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.cur
+	next.AIDefault = id
+	if err := s.st.SetJSON("settings", next); err != nil {
+		return err
+	}
+	s.cur = next
+	return nil
 }
 
 // AdminChat returns the admin chat of a channel.
@@ -123,8 +316,7 @@ type SettingsInput struct {
 	Timezone      string  `json:"timezone"`
 	RetentionDays int     `json:"retentionDays"`
 	PushBase      string  `json:"pushBase"`
-	AIKey         *string `json:"aiKey"`
-	AIModel       string  `json:"aiModel"`
+	AIFallback    bool    `json:"aiFallback"`
 	AIConsent     bool    `json:"aiConsent"`
 	AIAnonymize   bool    `json:"aiAnonymize"`
 	AutoAudit     bool    `json:"autoAudit"`
@@ -176,20 +368,7 @@ func (s *SettingsStore) Update(in SettingsInput) error {
 		next.ZaloToken = s.box.Seal(t)
 	}
 	next.ZaloAdmin, next.NotifyNew = in.ZaloAdmin, in.NotifyNew
-	if in.AIKey != nil {
-		k := strings.TrimSpace(*in.AIKey)
-		if k != "" && (len(k) < 20 || len(k) > 300 || strings.ContainsAny(k, " \t\r\n")) {
-			return errors.New("API key Anthropic không đúng định dạng")
-		}
-		next.AIKey = s.box.Seal(k)
-	}
-	if in.AIModel == "" {
-		in.AIModel = "claude-opus-5-5"
-	}
-	if _, ok := aiModels[in.AIModel]; !ok {
-		return errors.New("mô hình AI không hợp lệ")
-	}
-	next.AIModel, next.AIConsent, next.AIAnonymize, next.AutoAudit = in.AIModel, in.AIConsent, in.AIAnonymize, in.AutoAudit
+	next.AIFallback, next.AIConsent, next.AIAnonymize, next.AutoAudit = in.AIFallback, in.AIConsent, in.AIAnonymize, in.AutoAudit
 	next.AdminChat, next.SummaryOn, next.SummaryAt = in.AdminChat, in.SummaryOn, in.SummaryAt
 	next.RepeatMin, next.Timezone, next.RetentionDays, next.PushBase = in.RepeatMin, in.Timezone, in.RetentionDays, in.PushBase
 	if err := s.st.SetJSON("settings", next); err != nil {

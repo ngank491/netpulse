@@ -22,7 +22,8 @@ Chạy trên Windows, Linux, macOS, Raspberry Pi, Docker và Home Assistant OS.
   - Bot trả lời `/status` (xem tình trạng) và `/start` hoặc `/id` (cho biết Chat ID).
 - **Kiểm tra bảo mật & hiệu suất bằng AI**:
   - Bộ khoảng 30 quy tắc có sẵn (miễn phí, chạy ngay trên máy NetPulse).
-  - Agent Claude (tuỳ chọn) đọc cấu hình router ở chế độ chỉ đọc, chấm điểm, viết tổng quan và đưa lệnh khắc phục.
+  - Agent AI (tuỳ chọn) đọc cấu hình router ở chế độ chỉ đọc, chấm điểm, viết tổng quan và đưa lệnh khắc phục.
+  - Dùng được nhiều tài khoản AI: Claude, ChatGPT, Gemini, DeepSeek, Grok, Mistral, Groq, OpenRouter, Qwen, hoặc Ollama/LM Studio chạy trên máy; tự chuyển tài khoản khi lỗi.
   - Mật khẩu và khoá không bao giờ rời máy; IP public và MAC được che trước khi gửi.
   - Có thể tự kiểm tra hằng tuần và gửi tóm tắt qua Telegram/Zalo.
 - **Phân quyền**: quản trị viên và người xem. Người xem chỉ thấy các router được giao và bị chặn ở cả giao diện lẫn API.

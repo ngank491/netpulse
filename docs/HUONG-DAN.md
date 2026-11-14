@@ -272,20 +272,45 @@ Tab **Kiểm tra AI** trong trang router (chỉ quản trị viên chạy đư�
 
 1. NetPulse **đọc cấu hình router một lần, ở chế độ chỉ đọc**: firewall, NAT, dịch vụ quản trị, tài khoản, DNS, UPnP/SOCKS/proxy, Wi-Fi, scheduler/script, log, phiên bản RouterOS, bộ đếm lỗi interface, connection tracking… Không có lệnh nào thay đổi router.
 2. **Bộ kiểm tra có sẵn** (khoảng 30 quy tắc, miễn phí, chạy ngay trên máy NetPulse) chấm điểm và liệt kê vấn đề kèm lệnh khắc phục. Ví dụ: chain input không chặn WAN, Telnet/HTTP bật, DNS mở ra Internet, mở cổng RDP/SMB ra ngoài, dò mật khẩu trong log, script tải mã lạ, RouterOS cũ, thiếu FastTrack, cổng nhiều lỗi gói, CPU/RAM cao…
-3. Nếu bật **trợ lý AI (Claude)**, agent tự đọc thêm các mục cần thiết, đối chiếu lịch sử CPU/RAM/lưu lượng/sự kiện trong NetPulse, loại cảnh báo sai, tìm thêm vấn đề quy tắc bỏ sót (thứ tự rule, NAT, tài khoản lạ…). Sau đó agent viết **tổng quan, danh sách vấn đề theo mức độ và lệnh RouterOS khắc phục theo thứ tự an toàn**.
+3. Nếu bật **trợ lý AI** (Claude, ChatGPT, Gemini, DeepSeek… xem bảng bên dưới), agent tự đọc thêm các mục cần thiết, đối chiếu lịch sử CPU/RAM/lưu lượng/sự kiện trong NetPulse, loại cảnh báo sai, tìm thêm vấn đề quy tắc bỏ sót (thứ tự rule, NAT, tài khoản lạ…). Sau đó agent viết **tổng quan, danh sách vấn đề theo mức độ và lệnh RouterOS khắc phục theo thứ tự an toàn**.
 
 Router ở **chế độ push** chỉ được phân tích bằng dữ liệu giám sát. Muốn kiểm tra cấu hình bảo mật đầy đủ, dùng chế độ REST API.
 
-### Bật trợ lý AI
+### Thêm tài khoản AI
 
-1. Tạo API key tại **console.anthropic.com → API Keys**. Tài khoản cần có credit.
-2. Vào **Cài đặt → Trợ lý AI kiểm tra router (Claude)**:
-   - dán **Anthropic API key**;
-   - chọn **Mô hình**: *Claude Opus 5.5* (phân tích kỹ nhất, mặc định), *Sonnet 5.5* (nhanh, rẻ hơn) hoặc *Haiku 5.5* (rẻ nhất);
-   - đánh dấu **Cho phép gửi cấu hình router … tới Anthropic**;
-   - giữ **Che IP public và địa chỉ MAC** (khuyên dùng);
-   - (tuỳ chọn) **Tự động kiểm tra hằng tuần**: sáng Chủ nhật, NetPulse kiểm tra mọi router và gửi tóm tắt qua Telegram/Zalo.
-3. **Lưu cài đặt**, rồi mở router → **Kiểm tra AI** → **Chạy kiểm tra**. Mỗi lần mất khoảng 1–3 phút. Trong lúc chạy, trang hiện agent đang xem mục nào.
+NetPulse dùng được nhiều nhà cung cấp AI cùng lúc:
+
+| Nhà cung cấp | Lấy API key ở đâu | Ghi chú |
+|---|---|---|
+| **Claude** (Anthropic) | console.anthropic.com → API Keys | Mặc định Claude Opus 5.5; dùng SDK chính thức, có giá sẵn để ước tính chi phí |
+| **ChatGPT** (OpenAI) | platform.openai.com → API keys | Tài khoản API riêng, không phải gói ChatGPT Plus |
+| **Gemini** (Google) | aistudio.google.com → Get API key | Có hạn mức miễn phí |
+| **DeepSeek** | platform.deepseek.com → API keys | Giá rẻ |
+| **Grok** (xAI) | console.x.ai → API Keys | |
+| **Mistral** | console.mistral.ai → API Keys | |
+| **Groq** | console.groq.com → API Keys | Rất nhanh |
+| **OpenRouter** | openrouter.ai → Keys | Một key dùng được hàng trăm mô hình |
+| **Qwen** (Alibaba Cloud) | Model Studio → API Key | |
+| **Ollama / LM Studio** | không cần key | AI chạy trên máy của bạn; dữ liệu không ra khỏi mạng nội bộ |
+| **Khác** | theo nhà cung cấp | Bất kỳ dịch vụ nào tương thích OpenAI Chat Completions |
+
+1. Vào **Cài đặt → Trợ lý AI kiểm tra router → + Thêm tài khoản AI**.
+2. Chọn **Nhà cung cấp**. Tên và địa chỉ API được điền sẵn.
+3. Dán **API key**, bấm **Kiểm tra & lấy danh sách mô hình**:
+   - nếu key sai, NetPulse báo ngay;
+   - nếu đúng, ô **Mô hình** có gợi ý; chọn mô hình mạnh nhất có hỗ trợ gọi công cụ (tools / function calling).
+4. (Tuỳ chọn) Nhập **giá đầu vào/đầu ra** (USD cho 1 triệu token) để báo cáo ước tính chi phí. Claude đã có giá sẵn.
+5. Bấm **Thêm tài khoản**. Lặp lại cho các tài khoản khác.
+6. Chọn tài khoản **Mặc định** bằng nút tròn trong bảng.
+7. Đánh dấu **Cho phép gửi cấu hình router…** rồi bấm **Lưu cài đặt**. Nên giữ **Che IP public và MAC** và **Tự chuyển sang tài khoản khác khi lỗi**.
+
+Với **Ollama/LM Studio**, địa chỉ `localhost` là máy đang chạy NetPulse. Nếu AI chạy ở máy khác trong LAN, đổi thành IP máy đó, ví dụ `http://192.168.1.20:11434/v1`. Mô hình cục bộ nhỏ thường phân tích kém hơn nhiều so với mô hình đám mây.
+
+### Chạy kiểm tra
+
+Mở router → **Kiểm tra AI** → **Chạy kiểm tra**. Nếu có từ hai tài khoản trở lên, ô cạnh nút cho chọn tài khoản cho lần chạy này.
+
+Nếu tài khoản bị lỗi (hết credit, key sai, quá tải) và bạn bật tự chuyển, NetPulse thử lần lượt các tài khoản khác. Báo cáo ghi rõ đã chuyển vì sao. Kiểm tra định kỳ hằng tuần dùng tài khoản mặc định.
 
 ### Dữ liệu gửi đi và chi phí
 
@@ -320,8 +345,10 @@ Router ở **chế độ push** chỉ được phân tích bằng dữ liệu gi
 | Telegram/Zalo không nhận tin | Chưa lưu token, sai Chat ID, hoặc chưa nhắn bot trước | Xem lỗi đỏ cạnh tiêu đề kênh trong Cài đặt; nhắn bot rồi **Gửi tin thử** |
 | `Bot Token sai hoặc đã bị thu hồi` | Token bị đặt lại | Lấy token mới, dán lại |
 | Client hiện "MAC ngẫu nhiên" | Điện thoại/laptop dùng địa chỉ riêng tư | Bấm **Đặt tên** |
-| `Trợ lý AI lỗi: API key Anthropic không hợp lệ` | Sai key hoặc key đã bị thu hồi | Tạo key mới, dán lại trong Cài đặt |
-| `… vượt giới hạn tần suất hoặc hết hạn mức …` | Hết credit hoặc gọi quá nhiều | Nạp credit tại console.anthropic.com, thử lại sau |
+| `Trợ lý AI lỗi (…: API key không hợp lệ)` | Sai key hoặc key đã bị thu hồi | Tạo key mới, Sửa tài khoản AI, bấm **Kiểm tra & lấy danh sách mô hình** |
+| `… không tìm thấy mô hình hoặc sai địa chỉ API` | Gõ sai tên mô hình hoặc địa chỉ | Chọn lại mô hình từ danh sách |
+| Mô hình trả lời nhưng không nộp báo cáo | Mô hình không hỗ trợ gọi công cụ | Chọn mô hình khác (bản lớn/mới hơn) |
+| `… vượt giới hạn tần suất hoặc hết hạn mức …` | Hết credit hoặc gọi quá nhiều | Nạp credit ở trang của nhà cung cấp, hoặc bật tự chuyển sang tài khoản khác |
 | Báo cáo ghi "Router ở chế độ push…" | Router không đọc được qua REST API | Chuyển router sang cách A để kiểm tra cấu hình đầy đủ |
 | Quên mật khẩu NetPulse | – | Dừng NetPulse, chạy `netpulse reset-password -data <thư mục dữ liệu> admin "MatKhauMoi123"` |
 

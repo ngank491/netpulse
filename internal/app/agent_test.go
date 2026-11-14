@@ -111,8 +111,11 @@ func TestAgentEndToEnd(t *testing.T) {
 	box, _ := LoadBox(filepath.Join(dir, "key"))
 	settings, _ := NewSettingsStore(st, box)
 	key := "sk-ant-test-0123456789abcdefghij"
-	if err := settings.Update(SettingsInput{AIKey: &key, AIModel: "claude-opus-5-5", AIConsent: true, AIAnonymize: true,
+	if err := settings.Update(SettingsInput{AIConsent: true, AIAnonymize: true, AIFallback: true,
 		SummaryAt: "08:00", RepeatMin: 30, Timezone: "Asia/Ho_Chi_Minh", RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := settings.SaveProvider(AIProviderInput{Name: "Claude", Kind: "anthropic", Model: "claude-opus-5-5", Key: &key, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewHub(st, box, settings, true)
@@ -129,11 +132,11 @@ func TestAgentEndToEnd(t *testing.T) {
 	a := NewAuditor(h, st, settings, nil)
 	a.ctx, a.apiBase = ctx, srv.URL
 
-	id, err := a.Start(r.ID, "manual")
+	id, err := a.Start(r.ID, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Start(r.ID, "manual"); err == nil {
+	if _, err := a.Start(r.ID, "manual", ""); err == nil {
 		t.Fatal("second concurrent audit must be refused")
 	}
 	waitFor(t, "audit finished", func() bool { return a.Running(r.ID) == nil })
@@ -199,17 +202,161 @@ func TestAuditWithoutAI(t *testing.T) {
 	h.Start(ctx)
 	a := NewAuditor(h, st, settings, nil)
 	a.ctx = ctx
-	id, err := a.Start(r.ID, "manual")
+	id, err := a.Start(r.ID, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "audit finished", func() bool { return a.Running(r.ID) == nil })
 	rep, _ := st.GetAudit(id)
-	if rep.Status != "done" || rep.Source != "rules" || !strings.Contains(rep.Note, "Chưa cấu hình trợ lý AI") || !strings.Contains(rep.Markdown, "## Bảo mật") {
+	if rep.Status != "done" || rep.Source != "rules" || !strings.Contains(rep.Note, "Chưa có tài khoản AI") || !strings.Contains(rep.Markdown, "## Bảo mật") {
 		t.Fatalf("rules-only report: %+v", rep)
 	}
 	list, _ := st.ListAudits(r.ID, 10)
 	if len(list) != 1 || list[0].Markdown != "" {
 		t.Fatalf("list = %+v", list)
+	}
+}
+
+// fakeOpenAI is an OpenAI-compatible Chat Completions server (as used by
+// OpenAI, Gemini, DeepSeek, Grok, Ollama...). It checks the history it gets back.
+type fakeOpenAI struct {
+	mu     sync.Mutex
+	bodies []string
+	auth   []string
+}
+
+func (f *fakeOpenAI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	b, _ := io.ReadAll(r.Body)
+	f.mu.Lock()
+	f.bodies = append(f.bodies, string(b))
+	f.auth = append(f.auth, r.Header.Get("Authorization"))
+	f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Path == "/v1/models" {
+		io.WriteString(w, `{"data":[{"id":"models/gemini-x-flash"},{"id":"models/gemini-x-pro"}]}`)
+		return
+	}
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	json.Unmarshal(b, &req)
+	last := req.Messages[len(req.Messages)-1]
+	if last["role"] == "user" { // first turn: ask for two tools (one without id, like some local servers)
+		io.WriteString(w, `{"model":"gemini-x-pro","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[
+			{"id":"c1","type":"function","function":{"name":"get_router_data","arguments":"{\"path\":\"/ip/service\"}"}},
+			{"type":"function","function":{"name":"get_clients","arguments":{}}}]}}],"usage":{"prompt_tokens":900,"completion_tokens":60}}`)
+		return
+	}
+	io.WriteString(w, `{"model":"gemini-x-pro","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[
+		{"id":"c9","type":"function","function":{"name":"submit_report","arguments":"{\"security_score\":40,\"performance_score\":80,\"summary\":\"Tóm tắt từ Gemini\",\"findings\":[{\"severity\":\"high\",\"area\":\"security\",\"title\":\"Telnet bật\",\"evidence\":\"/ip service\",\"fix\":\"tắt\",\"commands\":[\"/ip service disable telnet\"]}],\"report_markdown\":\"## Tổng quan\\nOK\"}"}}]}}],
+		"usage":{"prompt_tokens":1500,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":500}}}`)
+}
+
+func TestOpenAICompatibleWithFallback(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(filepath.Join(dir, "db"))
+	defer st.Close()
+	box, _ := LoadBox(filepath.Join(dir, "key"))
+	settings, _ := NewSettingsStore(st, box)
+	settings.Update(SettingsInput{AIConsent: true, AIAnonymize: true, AIFallback: true, SummaryAt: "08:00", RepeatMin: 30, Timezone: "Asia/Ho_Chi_Minh", RetentionDays: 30})
+
+	// first account: Claude with a key the (fake) API rejects
+	badClaude := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+	}))
+	defer badClaude.Close()
+	k1 := "sk-ant-bad-0123456789abcdefghij"
+	claude, err := settings.SaveProvider(AIProviderInput{Name: "Claude", Kind: "anthropic", Model: "claude-opus-5-5", Key: &k1, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fo := &fakeOpenAI{}
+	srv := httptest.NewServer(fo)
+	defer srv.Close()
+	k2 := "AIza-test-key"
+	gem, err := settings.SaveProvider(AIProviderInput{Name: "Gemini", Kind: "openai", BaseURL: srv.URL + "/v1/", Model: "gemini-x-pro", Key: &k2, Enabled: true, PriceIn: 1, PriceOut: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gem.BaseURL != srv.URL+"/v1" || settings.Get().AIDefault != claude.ID {
+		t.Fatalf("base=%q default=%q", gem.BaseURL, settings.Get().AIDefault)
+	}
+	models, err := listModels(context.Background(), gem, k2, "")
+	if err != nil || strings.Join(models, ",") != "gemini-x-flash,gemini-x-pro" {
+		t.Fatalf("models = %v %v", models, err)
+	}
+
+	h := NewHub(st, box, settings, true)
+	r := &Router{Name: "Demo", Mode: "demo", Enabled: true, Interval: 300, WANTarget: "8.8.8.8"}
+	st.SaveRouter(r)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); h.Wait() }()
+	h.Start(ctx)
+	a := NewAuditor(h, st, settings, nil)
+	a.ctx, a.apiBase = ctx, badClaude.URL
+	id, err := a.Start(r.ID, "manual", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "audit finished", func() bool { return a.Running(r.ID) == nil })
+	rep, _ := st.GetAudit(id)
+	if rep.Status != "done" || rep.Source != "ai" || rep.Provider != "Gemini" || rep.Model != "gemini-x-pro" {
+		t.Fatalf("report: status=%s source=%s provider=%s model=%s err=%s", rep.Status, rep.Source, rep.Provider, rep.Model, rep.Error)
+	}
+	if len(rep.Attempts) != 1 || !strings.Contains(rep.Attempts[0], "Claude: API key không hợp lệ") {
+		t.Fatalf("attempts = %v", rep.Attempts)
+	}
+	if rep.SecScore != 40 || rep.Summary != "Tóm tắt từ Gemini" || rep.Findings[0].Commands[0] != "/ip service disable telnet" {
+		t.Fatalf("report content: %+v", rep)
+	}
+	if u := rep.Usage; u == nil || !u.CostKnown || u.InputTokens != 900+1000 || u.CacheRead != 500 || u.Turns != 2 {
+		t.Fatalf("usage = %+v", rep.Usage)
+	}
+	fo.mu.Lock()
+	defer fo.mu.Unlock()
+	if len(fo.bodies) != 3 || fo.auth[1] != "Bearer "+k2 { // /models + 2 chat turns
+		t.Fatalf("calls=%d auth=%v", len(fo.bodies), fo.auth)
+	}
+	var second struct {
+		Messages []map[string]any `json:"messages"`
+		Tools    []map[string]any `json:"tools"`
+	}
+	json.Unmarshal([]byte(fo.bodies[2]), &second)
+	roles := ""
+	for _, m := range second.Messages {
+		roles += m["role"].(string) + ","
+	}
+	if roles != "system,user,assistant,tool,tool," || second.Messages[4]["tool_call_id"] != "call_1" || len(second.Tools) != 4 {
+		t.Fatalf("history roles=%s msg=%v tools=%d", roles, second.Messages[4], len(second.Tools))
+	}
+	if _, strict := second.Tools[0]["function"].(map[string]any)["strict"]; strict {
+		t.Fatal("strict must only be sent to api.openai.com")
+	}
+	for _, b := range fo.bodies {
+		if strings.Contains(b, "45.141.") {
+			t.Fatal("public IP leaked to the AI provider")
+		}
+	}
+}
+
+func TestSettingsMigrationFromSingleKey(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(filepath.Join(dir, "db"))
+	defer st.Close()
+	box, _ := LoadBox(filepath.Join(dir, "key"))
+	old := defaultSettings()
+	old.AIKey, old.AIModel = box.Seal("sk-ant-old-0123456789abcdefghij"), "claude-sonnet-5-5"
+	st.SetJSON("settings", old)
+	s, err := NewSettingsStore(st, box)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := s.Providers()
+	if len(ps) != 1 || ps[0].Kind != "anthropic" || ps[0].Model != "claude-sonnet-5-5" || s.ProviderKey(ps[0].ID) != "sk-ant-old-0123456789abcdefghij" || s.Get().AIDefault != ps[0].ID {
+		t.Fatalf("migrated = %+v key=%q", ps, s.ProviderKey("claude"))
+	}
+	if ps[0].Key != "" {
+		t.Fatal("Providers() must not expose keys")
 	}
 }

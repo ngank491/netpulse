@@ -68,6 +68,10 @@ func (s *Server) Handler() http.Handler {
 	user("GET /api/audits/{aid}", s.getAudit)
 	admin("POST /api/admin/routers/{id}/audit", s.startAudit)
 	admin("DELETE /api/admin/audits/{aid}", s.deleteAudit)
+	admin("POST /api/admin/ai/providers", s.saveProvider)
+	admin("DELETE /api/admin/ai/providers/{pid}", s.deleteProvider)
+	admin("PUT /api/admin/ai/default", s.setDefaultProvider)
+	admin("POST /api/admin/ai/models", s.listProviderModels)
 
 	admin("GET /api/admin/routers", s.adminRouters)
 	admin("POST /api/admin/routers", s.saveRouter)
@@ -1047,10 +1051,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request, u *User) {
 		ok[ch] = !h || s.settings.Token(ch) != ""
 	}
 	cur.TGToken, cur.ZaloToken = "", ""
-	hasAI := cur.AIKey != ""
-	cur.AIKey = ""
+	cur.AIKey, cur.AIProviders = "", nil
 	writeJSON(w, 200, map[string]any{"settings": cur, "hasToken": has, "tokenOk": ok, "errors": s.n.LastErrors(),
-		"hasAIKey": hasAI, "aiKeyOk": !hasAI || s.settings.AIKey() != "", "aiModels": []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"},
+		"aiProviders": s.providerViews(),
 		"recentChats": s.n.Recent(), "version": Version, "dataDir": s.cfg.DataDir})
 }
 
@@ -1115,7 +1118,11 @@ func (s *Server) setClientName(w http.ResponseWriter, r *http.Request, u *User) 
 // ---------- audits ----------
 
 func (s *Server) startAudit(w http.ResponseWriter, r *http.Request, u *User) {
-	id, err := s.audit.Start(pathID(r, "id"), "manual")
+	var in struct {
+		Provider string `json:"provider"`
+	}
+	json.NewDecoder(r.Body).Decode(&in) // body is optional
+	id, err := s.audit.Start(pathID(r, "id"), "manual", in.Provider)
 	if errors.Is(err, ErrNotFound) {
 		errJSON(w, 404, "không tìm thấy router")
 		return
@@ -1140,7 +1147,7 @@ func (s *Server) listAudits(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	st := s.settings.Get()
 	writeJSON(w, 200, map[string]any{"running": s.audit.Running(id), "reports": list,
-		"aiReady": s.settings.AIKey() != "" && st.AIConsent, "aiModel": st.AIModel})
+		"aiReady": st.AIConsent && len(s.settings.ProviderOrder("")) > 0, "providers": s.providerViews(), "aiDefault": st.AIDefault})
 }
 
 func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, u *User) {
@@ -1155,6 +1162,97 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, u *User) {
 		}
 	}
 	writeJSON(w, 200, rep)
+}
+
+// ---------- AI accounts ----------
+
+type providerView struct {
+	AIProvider
+	HasKey bool `json:"hasKey"`
+	KeyOK  bool `json:"keyOk"`
+	Usable bool `json:"usable"`
+}
+
+func (s *Server) providerViews() []providerView {
+	out := []providerView{}
+	for _, p := range s.settings.Get().AIProviders {
+		key := s.settings.ProviderKey(p.ID)
+		v := providerView{AIProvider: p, HasKey: p.Key != "", KeyOK: p.Key == "" || key != "", Usable: s.settings.usable(p)}
+		v.Key = ""
+		out = append(out, v)
+	}
+	return out
+}
+
+func (s *Server) saveProvider(w http.ResponseWriter, r *http.Request, u *User) {
+	var in AIProviderInput
+	if !readJSON(w, r, &in) {
+		return
+	}
+	p, err := s.settings.SaveProvider(in)
+	if err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, p)
+}
+
+func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request, u *User) {
+	if err := s.settings.DeleteProvider(r.PathValue("pid")); err != nil {
+		serverErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) setDefaultProvider(w http.ResponseWriter, r *http.Request, u *User) {
+	var in struct {
+		ID string `json:"id"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if err := s.settings.SetDefaultProvider(in.ID); err != nil {
+		serverErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// listProviderModels checks the key and returns the models the account can use.
+// It works for unsaved forms: a typed key wins, otherwise the stored one is used.
+func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request, u *User) {
+	var in AIProviderInput
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if in.Name == "" {
+		in.Name = "test"
+	}
+	key := ""
+	if in.Key != nil {
+		key = strings.TrimSpace(*in.Key)
+	} else if in.ID != "" {
+		key = s.settings.ProviderKey(in.ID)
+	}
+	empty := ""
+	in.Key = &empty // validation only; never stored here
+	if in.Kind == "anthropic" {
+		in.Key = &key
+	}
+	p, err := s.settings.resolveProvider(in)
+	if err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	models, err := listModels(ctx, p, key, s.audit.apiBase)
+	if err != nil {
+		errJSON(w, 502, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"models": models})
 }
 
 func (s *Server) deleteAudit(w http.ResponseWriter, r *http.Request, u *User) {

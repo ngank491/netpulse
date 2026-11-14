@@ -10,9 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/anthropics/anthropic-sdk-go/v2"
-	"github.com/anthropics/anthropic-sdk-go/v2/option"
 )
 
 // ---------- audit reports ----------
@@ -24,16 +21,20 @@ type AIUsage struct {
 	CacheWrite   int64   `json:"cacheWrite"`
 	Turns        int     `json:"turns"`
 	CostUSD      float64 `json:"costUsd"`
+	CostKnown    bool    `json:"costKnown"`
 }
 
 type AuditReport struct {
-	ID           int64     `json:"id"`
-	RouterID     int64     `json:"routerId"`
-	StartedAt    int64     `json:"startedAt"`
-	FinishedAt   int64     `json:"finishedAt"`
-	Status       string    `json:"status"` // running | done | error
-	Source       string    `json:"source"` // ai | rules
-	Model        string    `json:"model,omitempty"`
+	ID           int64    `json:"id"`
+	RouterID     int64    `json:"routerId"`
+	StartedAt    int64    `json:"startedAt"`
+	FinishedAt   int64    `json:"finishedAt"`
+	Status       string   `json:"status"` // running | done | error
+	Source       string   `json:"source"` // ai | rules
+	Model        string   `json:"model,omitempty"`
+	Provider     string   `json:"provider,omitempty"` // name of the AI account that wrote the report
+	Attempts     []string `json:"attempts,omitempty"` // AI accounts that failed before
+	providerID   string
 	Trigger      string    `json:"trigger"` // manual | weekly
 	SecScore     int       `json:"secScore"`
 	PerfScore    int       `json:"perfScore"`
@@ -85,7 +86,7 @@ func (a *Auditor) setProgress(r *AuditReport, msg string) {
 }
 
 // Start launches an audit in the background and returns its id.
-func (a *Auditor) Start(routerID int64, trigger string) (int64, error) {
+func (a *Auditor) Start(routerID int64, trigger, providerID string) (int64, error) {
 	if a.ctx == nil {
 		return 0, errors.New("auditor chưa khởi động")
 	}
@@ -97,7 +98,7 @@ func (a *Auditor) Start(routerID int64, trigger string) (int64, error) {
 	if a.Running(routerID) != nil {
 		return 0, busy
 	}
-	rep := &AuditReport{RouterID: routerID, StartedAt: nowMs(), Status: "running", Trigger: trigger, Progress: "Đang chờ lượt…"}
+	rep := &AuditReport{RouterID: routerID, StartedAt: nowMs(), Status: "running", Trigger: trigger, Progress: "Đang chờ lượt…", providerID: providerID}
 	id, err := a.st.SaveAudit(rep) // sets rep.ID before anyone else can see rep
 	if err != nil {
 		return 0, err
@@ -200,13 +201,13 @@ func (a *Auditor) run(rs *RState, rep *AuditReport) {
 		r.Markdown, r.Summary = rulesMarkdown(r), rulesSummary(r)
 	})
 
-	// 3. AI agent (optional)
+	// 3. AI agent (optional): the chosen account first, then others if fallback is on
 	s := a.settings.Get()
-	key := a.settings.AIKey()
+	order := a.settings.ProviderOrder(rep.providerID)
 	switch {
-	case key == "":
+	case len(order) == 0:
 		a.set(rep, func(r *AuditReport) {
-			r.Note = strings.TrimSpace(r.Note + " Chưa cấu hình trợ lý AI: báo cáo chỉ gồm bộ kiểm tra có sẵn.")
+			r.Note = strings.TrimSpace(r.Note + " Chưa có tài khoản AI: báo cáo chỉ gồm bộ kiểm tra có sẵn.")
 		})
 		return
 	case !s.AIConsent:
@@ -215,34 +216,44 @@ func (a *Auditor) run(rs *RState, rep *AuditReport) {
 		})
 		return
 	}
-	a.setProgress(rep, "Trợ lý AI đang phân tích…")
-	var anon *anonymizer
-	if s.AIAnonymize {
-		anon = newAnonymizer()
-	}
 	a.mu.Lock()
 	base := *rep // the agent reads rule results/scores from a private copy
 	a.mu.Unlock()
-	res, err := a.runAgent(ctx, key, s.AIModel, rs, cfg, snap, perf, &base, rep, anon)
-	a.set(rep, func(r *AuditReport) {
-		if res != nil {
-			u := res.Usage
-			r.Usage = &u
+	var attempts []string
+	for _, p := range order {
+		if ctx.Err() != nil {
+			break
 		}
+		a.setProgress(rep, p.Name+" đang phân tích…")
+		var anon *anonymizer
+		if s.AIAnonymize {
+			anon = newAnonymizer()
+		}
+		res, err := a.runAgent(ctx, p, a.settings.ProviderKey(p.ID), rs, cfg, snap, perf, &base, rep, anon)
 		if err != nil {
-			r.Error = "Trợ lý AI lỗi: " + err.Error() + " — đang hiển thị kết quả của bộ kiểm tra có sẵn."
-			return
+			attempts = append(attempts, p.Name+": "+err.Error())
+			a.set(rep, func(r *AuditReport) { r.Attempts = attempts })
+			continue
 		}
-		r.Source, r.Model = "ai", res.Model
-		r.SecScore, r.PerfScore = clampInt(res.SecScore, 0, 100), clampInt(res.PerfScore, 0, 100)
-		r.Summary, r.Markdown, r.Findings = res.Summary, res.Markdown, res.Findings
-		if r.Findings == nil {
-			r.Findings = []Finding{}
-		}
+		a.set(rep, func(r *AuditReport) {
+			u := res.Usage
+			r.Usage, r.Attempts = &u, attempts
+			r.Source, r.Model, r.Provider = "ai", res.Model, p.Name
+			r.SecScore, r.PerfScore = clampInt(res.SecScore, 0, 100), clampInt(res.PerfScore, 0, 100)
+			r.Summary, r.Markdown, r.Findings = res.Summary, res.Markdown, res.Findings
+			if r.Findings == nil {
+				r.Findings = []Finding{}
+			}
+		})
+		return
+	}
+	a.set(rep, func(r *AuditReport) {
+		r.Attempts = attempts
+		r.Error = "Trợ lý AI lỗi (" + strings.Join(attempts, "; ") + ") — đang hiển thị kết quả của bộ kiểm tra có sẵn."
 	})
 }
 
-// ---------- the Claude agent ----------
+// ---------- the agent (any provider) ----------
 
 type aiResult struct {
 	Model     string
@@ -254,7 +265,8 @@ type aiResult struct {
 	Usage     AIUsage
 }
 
-var aiModels = map[string][3]float64{ // input, output, cache read — USD per million tokens
+// Known Claude prices: input, output, cache read — USD per million tokens.
+var aiModels = map[string][3]float64{
 	"claude-opus-5-5":   {4, 20, 0.20},
 	"claude-sonnet-5-5": {2, 10, 0.10},
 	"claude-haiku-5-5":  {0.10, 0.50, 0.01},
@@ -279,40 +291,36 @@ Finish by calling submit_report exactly once:
 - findings: ordered from most to least severe; severity is one of critical, high, medium, low, info; area is one of security, performance, reliability. Each has a short title, the evidence, a fix explanation and the commands (may be empty).
 - report_markdown: the full report with these sections: "## Tổng quan", "## Bảo mật", "## Hiệu suất và độ ổn định", "## Việc cần làm theo thứ tự ưu tiên". Put commands in fenced code blocks. Keep it readable for a technician; no filler.`
 
-func strictSchema(props map[string]any, required ...string) anthropic.BetaToolInputSchemaParam {
+func objSchema(props map[string]any, required ...string) map[string]any {
 	if required == nil {
 		required = []string{}
 	}
-	return anthropic.BetaToolInputSchemaParam{Properties: props, Required: required, ExtraFields: map[string]any{"additionalProperties": false}}
+	return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 }
 
-func agentTools(paths []string) []anthropic.BetaToolUnionParam {
-	finding := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "info"}},
-			"area":     map[string]any{"type": "string", "enum": []string{"security", "performance", "reliability"}},
-			"title":    map[string]any{"type": "string"},
-			"evidence": map[string]any{"type": "string"},
-			"fix":      map[string]any{"type": "string"},
-			"commands": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		},
-		"required":             []string{"severity", "area", "title", "evidence", "fix", "commands"},
-		"additionalProperties": false,
-	}
-	tools := []anthropic.BetaToolParam{
-		{Name: "get_router_data", Description: anthropic.String("Read one section of the router configuration/state that NetPulse collected read-only (e.g. /ip/firewall/filter, /ip/service, /user, /log). Returns the rows as JSON; secrets are already removed."),
-			InputSchema: strictSchema(map[string]any{"path": map[string]any{"type": "string", "enum": paths, "description": "Section path from the list in the first message"}}, "path")},
-		{Name: "get_history", Description: anthropic.String("Statistics NetPulse recorded over time for this router. kind=cpu_mem_interfaces: CPU/RAM and per-interface traffic (bits/s) avg/p95/max; kind=events: the warning/info event log; kind=devices: ping-monitored devices with status and availability. hours: 1-720. interface: optional interface name for cpu_mem_interfaces (empty string = busiest interfaces)."),
-			InputSchema: strictSchema(map[string]any{
+// agentTools are read-only; submit_report ends the run.
+func agentTools(paths []string) []llmTool {
+	finding := objSchema(map[string]any{
+		"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low", "info"}},
+		"area":     map[string]any{"type": "string", "enum": []string{"security", "performance", "reliability"}},
+		"title":    map[string]any{"type": "string"},
+		"evidence": map[string]any{"type": "string"},
+		"fix":      map[string]any{"type": "string"},
+		"commands": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+	}, "severity", "area", "title", "evidence", "fix", "commands")
+	return []llmTool{
+		{"get_router_data", "Read one section of the router configuration/state that NetPulse collected read-only (e.g. /ip/firewall/filter, /ip/service, /user, /log). Returns the rows as JSON; secrets are already removed.",
+			objSchema(map[string]any{"path": map[string]any{"type": "string", "enum": paths, "description": "Section path from the list in the first message"}}, "path")},
+		{"get_history", "Statistics NetPulse recorded over time for this router. kind=cpu_mem_interfaces: CPU/RAM and per-interface traffic (bits/s) avg/p95/max; kind=events: the warning/info event log; kind=devices: ping-monitored devices with status and availability. hours: 1-720. interface: optional interface name for cpu_mem_interfaces (empty string = busiest interfaces).",
+			objSchema(map[string]any{
 				"kind":      map[string]any{"type": "string", "enum": []string{"cpu_mem_interfaces", "events", "devices"}},
 				"hours":     map[string]any{"type": "integer"},
 				"interface": map[string]any{"type": "string"},
 			}, "kind", "hours", "interface")},
-		{Name: "get_clients", Description: anthropic.String("Summary of client devices seen on the router: counts online/offline, unnamed and randomised-MAC devices, vendors, and devices first seen in the last 7 days."),
-			InputSchema: strictSchema(map[string]any{})},
-		{Name: "submit_report", Description: anthropic.String("Submit the final audit report. Call exactly once, at the end."),
-			InputSchema: strictSchema(map[string]any{
+		{"get_clients", "Summary of client devices seen on the router: counts online/offline, unnamed and randomised-MAC devices, vendors, and devices first seen in the last 7 days.",
+			objSchema(map[string]any{})},
+		{"submit_report", "Submit the final audit report. Call exactly once, at the end.",
+			objSchema(map[string]any{
 				"security_score":    map[string]any{"type": "integer"},
 				"performance_score": map[string]any{"type": "integer"},
 				"summary":           map[string]any{"type": "string"},
@@ -320,39 +328,43 @@ func agentTools(paths []string) []anthropic.BetaToolUnionParam {
 				"report_markdown":   map[string]any{"type": "string"},
 			}, "security_score", "performance_score", "summary", "findings", "report_markdown")},
 	}
-	out := make([]anthropic.BetaToolUnionParam, len(tools))
-	for i := range tools {
-		tools[i].Strict = anthropic.Bool(true)
-		out[i] = anthropic.BetaToolUnionParam{OfTool: &tools[i]}
-	}
-	return out
 }
 
-func (a *Auditor) runAgent(ctx context.Context, key, model string, rs *RState, cfg Router, snap *auditSnapshot, perf perfStats, rep, live *AuditReport, anon *anonymizer) (*aiResult, error) {
-	if _, ok := aiModels[model]; !ok {
-		model = "claude-opus-5-5"
+func estimateCost(p AIProvider, model string, u *AIUsage) {
+	price := [3]float64{p.PriceIn, p.PriceOut, p.PriceIn}
+	if p.Kind == "anthropic" {
+		if known, ok := aiModels[model]; ok && p.PriceIn == 0 {
+			price = known
+		}
 	}
-	opts := []option.RequestOption{option.WithAPIKey(key), option.WithRequestTimeout(5 * time.Minute), option.WithMaxRetries(3)}
-	if a.apiBase != "" {
-		opts = append(opts, option.WithBaseURL(a.apiBase))
+	if price[0] == 0 && price[1] == 0 {
+		u.CostUSD, u.CostKnown = 0, false
+		return
 	}
-	client := anthropic.NewClient(opts...)
+	cacheRead := price[2]
+	if p.Kind == "openai" {
+		cacheRead = price[0] / 2
+	}
+	u.CostUSD = (float64(u.InputTokens)*price[0] + float64(u.CacheWrite)*price[0]*1.25 + float64(u.OutputTokens)*price[1] + float64(u.CacheRead)*cacheRead) / 1e6
+	u.CostKnown = true
+}
 
+func (a *Auditor) runAgent(ctx context.Context, p AIProvider, key string, rs *RState, cfg Router, snap *auditSnapshot, perf perfStats, rep, live *AuditReport, anon *anonymizer) (*aiResult, error) {
 	var paths []string
 	var index strings.Builder
-	for _, p := range auditPaths {
-		sec := snap.Sections[p.Path]
+	for _, ap := range auditPaths {
+		sec := snap.Sections[ap.Path]
 		if sec == nil {
 			continue
 		}
 		switch {
 		case sec.Unsupported:
-			fmt.Fprintf(&index, "- %s (%s): không có trên router này\n", p.Path, p.Title)
+			fmt.Fprintf(&index, "- %s (%s): không có trên router này\n", ap.Path, ap.Title)
 		case sec.Error != "":
-			fmt.Fprintf(&index, "- %s (%s): không đọc được (%s)\n", p.Path, p.Title, sec.Error)
+			fmt.Fprintf(&index, "- %s (%s): không đọc được (%s)\n", ap.Path, ap.Title, sec.Error)
 		default:
-			paths = append(paths, p.Path)
-			fmt.Fprintf(&index, "- %s (%s): %d dòng\n", p.Path, p.Title, sec.Total)
+			paths = append(paths, ap.Path)
+			fmt.Fprintf(&index, "- %s (%s): %d dòng\n", ap.Path, ap.Title, sec.Total)
 		}
 	}
 	for path, sec := range snap.Sections { // push-mode sections not in auditPaths
@@ -389,103 +401,58 @@ Hãy kiểm tra router này và gọi submit_report khi xong.`,
 		firstNonEmpty(strings.Join(wans, ", "), "chưa cấu hình"),
 		index.String(), rep.SecScore, rep.PerfScore, ruleJSON, perfJSON)
 
-	betas := []anthropic.AnthropicBeta{}
-	params := anthropic.BetaMessageNewParams{
-		Model:        model,
-		MaxTokens:    16000,
-		System:       []anthropic.BetaTextBlockParam{{Text: agentSystem}},
-		Tools:        agentTools(paths),
-		OutputConfig: anthropic.BetaOutputConfigParam{Effort: anthropic.BetaOutputConfigEffortHigh},
-		Messages:     []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(anon.Mask(first)))},
-		CacheControl: anthropic.NewBetaCacheControlEphemeralParam(),
+	sess, err := newSession(p, key, agentSystem, anon.Mask(first), agentTools(paths), a.apiBase)
+	if err != nil {
+		return nil, err
 	}
-	if model != "claude-haiku-5-5" { // server-side refusal fallback (not offered for Haiku)
-		params.Fallbacks = anthropic.BetaFallbacksParamOfDefault()
-		betas = append(betas, anthropic.AnthropicBetaServerSideFallback2026_07_01)
-	}
-	params.Betas = betas
-
-	out := &aiResult{Model: model}
-	price := aiModels[model]
+	out := &aiResult{Model: p.Model}
+	var results []llmResult
+	nudge := ""
 	for turn := 0; turn < 18; turn++ {
-		resp, err := client.Beta.Messages.New(ctx, params)
+		t, err := sess.Next(ctx, results, nudge)
 		if err != nil {
-			return out, friendlyAIError(err)
+			return out, err
 		}
-		u := resp.Usage
-		out.Usage.InputTokens += u.InputTokens
-		out.Usage.OutputTokens += u.OutputTokens
-		out.Usage.CacheRead += u.CacheReadInputTokens
-		out.Usage.CacheWrite += u.CacheCreationInputTokens
+		out.Usage.InputTokens += t.In
+		out.Usage.OutputTokens += t.Out
+		out.Usage.CacheRead += t.CacheRead
+		out.Usage.CacheWrite += t.CacheWrite
 		out.Usage.Turns++
-		out.Usage.CostUSD = (float64(out.Usage.InputTokens)*price[0] + float64(out.Usage.CacheWrite)*price[0]*1.25 +
-			float64(out.Usage.OutputTokens)*price[1] + float64(out.Usage.CacheRead)*price[2]) / 1e6
-		if string(resp.Model) != "" {
-			out.Model = string(resp.Model)
+		if t.Model != "" {
+			out.Model = t.Model
 		}
-		if resp.StopReason == anthropic.BetaStopReasonRefusal {
+		estimateCost(p, out.Model, &out.Usage)
+		if t.Stop == "refusal" {
 			return out, errors.New("mô hình từ chối yêu cầu")
 		}
-		params.Messages = append(params.Messages, resp.ToParam())
-
-		var results []anthropic.BetaContentBlockParamUnion
-		var lastText string
+		results, nudge = nil, ""
 		submitted := false
-		for _, block := range resp.Content {
-			switch b := block.AsAny().(type) {
-			case anthropic.BetaTextBlock:
-				lastText = b.Text
-			case anthropic.BetaToolUseBlock:
-				if resp.StopReason == anthropic.BetaStopReasonMaxTokens {
-					results = append(results, anthropic.NewBetaToolResultBlock(b.ID, "INVALID_JSON: output was cut off, call the tool again with shorter content", true))
-					continue
-				}
-				text, isErr, done := a.execTool(b.Name, b.JSON.Input.Raw(), rs, snap, cfg.ID, live, anon, out)
-				submitted = submitted || done
-				results = append(results, anthropic.NewBetaToolResultBlock(b.ID, anon.Mask(text), isErr))
+		for _, c := range t.Calls {
+			if t.Stop == "length" {
+				results = append(results, llmResult{c.ID, "INVALID_JSON: output was cut off, call the tool again with shorter content", true})
+				continue
 			}
+			text, isErr, done := a.execTool(c.Name, c.Args, rs, snap, cfg.ID, live, anon, out)
+			submitted = submitted || done
+			results = append(results, llmResult{c.ID, anon.Mask(text), isErr})
 		}
 		if submitted {
 			return out, nil
 		}
-		if len(results) == 0 {
-			if strings.TrimSpace(lastText) != "" { // ended with prose instead of the tool: keep it
-				out.Markdown = anon.Unmask(lastText)
+		if len(t.Calls) == 0 {
+			if strings.TrimSpace(t.Text) != "" { // ended with prose instead of the tool: keep it
+				out.Markdown = anon.Unmask(t.Text)
 				out.SecScore, out.PerfScore = rep.SecScore, rep.PerfScore
 				out.Summary, out.Findings = rep.Summary, rep.RuleFindings
 				return out, nil
 			}
-			return out, fmt.Errorf("mô hình dừng mà chưa nộp báo cáo (%s)", resp.StopReason)
+			return out, fmt.Errorf("mô hình dừng mà chưa nộp báo cáo (%s)", t.Stop)
 		}
 		if turn >= 14 {
-			results = append(results, anthropic.NewBetaTextBlock("Bạn đã có đủ dữ liệu. Hãy gọi submit_report ngay bây giờ."))
+			nudge = "Bạn đã có đủ dữ liệu. Hãy gọi submit_report ngay bây giờ."
 		}
-		params.Messages = append(params.Messages, anthropic.NewBetaUserMessage(results...))
 	}
 	return out, errors.New("quá số bước cho phép mà chưa có báo cáo")
-}
-
-func friendlyAIError(err error) error {
-	var apierr *anthropic.Error
-	if errors.As(err, &apierr) {
-		switch apierr.StatusCode {
-		case 401:
-			return errors.New("API key Anthropic không hợp lệ")
-		case 403:
-			return errors.New("API key không có quyền dùng mô hình này")
-		case 404:
-			return errors.New("không tìm thấy mô hình (kiểm tra tên mô hình trong Cài đặt)")
-		case 429:
-			return errors.New("vượt giới hạn tần suất hoặc hết hạn mức của tài khoản Anthropic, thử lại sau")
-		case 529, 503:
-			return errors.New("dịch vụ AI đang quá tải, thử lại sau")
-		}
-		return fmt.Errorf("Anthropic API trả lỗi %d", apierr.StatusCode)
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return errors.New("quá thời gian chờ")
-	}
-	return fmt.Errorf("không kết nối được Anthropic API: %v", err)
 }
 
 // execTool runs one read-only tool. done=true when the final report was accepted.
@@ -715,7 +682,7 @@ func (a *Auditor) Run(ctx context.Context) {
 			if !enabled {
 				continue
 			}
-			aid, err := a.Start(id, "weekly")
+			aid, err := a.Start(id, "weekly", "")
 			if err != nil {
 				continue
 			}

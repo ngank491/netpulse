@@ -893,7 +893,7 @@ function scoreCard(label, v) {
 }
 
 function tabAudit(id) {
-  let head, body, histSel, runBtn, cur = null, lastList = 0, info = null, loadedId = 0;
+  let head, body, histSel, runBtn, provSel, cur = null, lastList = 0, info = null, loadedId = 0;
   const showReport = async aid => {
     try { cur = await api('GET', `/api/audits/${aid}`); loadedId = aid; render(); } catch (e) { toast(e.message, 'bad'); }
   };
@@ -914,12 +914,13 @@ function tabAudit(id) {
     const findings = r.findings || [];
     const u = r.usage;
     parts.push(h('div', { class: 'grid tiles' }, scoreCard('Bảo mật', r.secScore), scoreCard('Hiệu suất & ổn định', r.perfScore),
-      h('div', { class: 'tile' }, h('div', { class: 'k' }, 'Nguồn'), h('div', { class: 'v sm' }, r.source === 'ai' ? 'Trợ lý AI · ' + (r.model || '') : 'Bộ kiểm tra có sẵn'),
+      h('div', { class: 'tile' }, h('div', { class: 'k' }, 'Nguồn'), h('div', { class: 'v sm' }, r.source === 'ai' ? (r.provider || 'Trợ lý AI') + ' · ' + (r.model || '') : 'Bộ kiểm tra có sẵn'),
         h('div', { class: 'muted small' }, fmtTime(r.startedAt) + (r.trigger === 'weekly' ? ' · định kỳ' : ''))),
-      u ? h('div', { class: 'tile' }, h('div', { class: 'k' }, 'Chi phí AI (ước tính)'), h('div', { class: 'v sm' }, '$' + u.costUsd.toFixed(3)),
+      u ? h('div', { class: 'tile' }, h('div', { class: 'k' }, 'Chi phí AI (ước tính)'), h('div', { class: 'v sm' }, u.costKnown ? '$' + u.costUsd.toFixed(3) : 'chưa rõ giá'),
         h('div', { class: 'muted small' }, `${Math.round((u.inputTokens + u.cacheRead + u.cacheWrite) / 1000)}k vào · ${Math.round(u.outputTokens / 1000)}k ra · ${u.turns} lượt`)) : null));
     if (r.summary) parts.push(h('div', { class: 'panel panel-b' }, h('b', null, 'Tóm tắt: '), r.summary));
     if (r.error) parts.push(h('div', { class: 'box bad' }, r.error));
+    else if (r.attempts && r.attempts.length) parts.push(h('div', { class: 'hint' }, 'Đã tự chuyển tài khoản AI vì: ' + r.attempts.join('; ')));
     if (r.note) parts.push(h('div', { class: 'hint' }, r.note));
     const fp = tablePanel('Vấn đề và cách khắc phục', 'audit-f-' + id);
     fp.draw([
@@ -946,12 +947,14 @@ function tabAudit(id) {
       head = h('div', { class: 'row' });
       body = h('div', { class: 'stack' });
       histSel = h('select', { class: 'search', onchange: e => e.target.value && showReport(+e.target.value) });
+      provSel = me.role === 'admin' ? h('select', { class: 'search hidden', title: 'Tài khoản AI dùng cho lần kiểm tra này' }) : null;
       runBtn = me.role === 'admin' ? h('button', { class: 'primary', onclick: e => busy(e.target, async () => {
-        await api('POST', `/api/admin/routers/${id}/audit`); lastList = 0; cur = null; loadedId = 0; toast('Đã bắt đầu kiểm tra', 'ok'); refresh();
+        await api('POST', `/api/admin/routers/${id}/audit`, { provider: provSel && !provSel.classList.contains('hidden') ? provSel.value : '' });
+        lastList = 0; cur = null; loadedId = 0; toast('Đã bắt đầu kiểm tra', 'ok'); refresh();
       }) }, 'Chạy kiểm tra') : null;
       el.append(h('div', { class: 'stack' }, h('div', { class: 'panel' }, h('div', { class: 'panel-h' },
         h('h2', null, 'Kiểm tra bảo mật & hiệu suất'), h('span', { class: 'muted small' }, 'đọc cấu hình ở chế độ chỉ đọc, không thay đổi router'),
-        h('div', { class: 'grow' }), histSel, runBtn)), body));
+        h('div', { class: 'grow' }), histSel, provSel, runBtn)), body));
     },
     async update() {
       const wasRunning = info && info.running;
@@ -961,6 +964,12 @@ function tabAudit(id) {
       const opts = info.reports.map(r => h('option', { value: r.id, selected: r.id === loadedId },
         `${fmtTime(r.startedAt)} · ${r.status === 'running' ? 'đang chạy' : r.status === 'error' ? 'lỗi' : `bảo mật ${r.secScore} · hiệu suất ${r.perfScore}`}${r.source === 'ai' ? ' · AI' : ''}`));
       fill(histSel, info.reports.length ? opts : h('option', { value: '' }, 'Chưa có báo cáo'));
+      if (provSel) {
+        const usable = (info.providers || []).filter(p => p.usable);
+        const prev = provSel.value || info.aiDefault;
+        provSel.classList.toggle('hidden', !info.aiReady || usable.length < 2);
+        fill(provSel, usable.map(p => h('option', { value: p.id, selected: p.id === prev }, p.name + ' · ' + p.model)));
+      }
       const newest = info.reports.find(r => r.status !== 'running');
       if (wasRunning && !info.running && newest) { await showReport(newest.id); return; }
       if (!loadedId && newest) { await showReport(newest.id); return; }
@@ -1272,23 +1281,28 @@ function settingsPage() {
             }) }, 'Gửi tin thử'), h('span', { class: 'hint' }, 'Lưu cài đặt trước khi gửi thử.')),
             h('p', { class: 'hint full' }, c.how)));
       };
-      const aiKey = h('input', { type: 'password', autocomplete: 'off', placeholder: d.hasAIKey ? '(đã lưu – để trống để giữ nguyên)' : 'sk-ant-…' });
-      const aiRemove = h('input', { type: 'checkbox' });
-      const aiModel = h('select', null, [['claude-opus-5-5', 'Claude Opus 5.5 – phân tích kỹ nhất (khuyên dùng)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 – nhanh, rẻ hơn'], ['claude-haiku-5-5', 'Claude Haiku 5.5 – rẻ nhất, phân tích đơn giản']]
-        .map(([v, t]) => h('option', { value: v, selected: (st.aiModel || 'claude-opus-5-5') === v }, t)));
       const aiConsent = h('input', { type: 'checkbox', checked: st.aiConsent });
       const aiAnon = h('input', { type: 'checkbox', checked: st.aiAnonymize });
+      const aiFallback = h('input', { type: 'checkbox', checked: st.aiFallback });
       const autoAudit = h('input', { type: 'checkbox', checked: st.autoAudit });
-      const aiPanel = h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Trợ lý AI kiểm tra router (Claude)'),
-        d.hasAIKey ? badge(d.aiKeyOk ? 'up' : 'down', d.aiKeyOk ? 'Đã có API key' : 'Không giải mã được key') : badge('unknown', 'Chưa cấu hình')),
-        h('div', { class: 'panel-b form' },
-          field('Anthropic API key', aiKey), field('Mô hình', aiModel),
-          d.hasAIKey ? h('div', { class: 'full' }, check('Xoá API key đã lưu', aiRemove)) : null,
-          h('div', { class: 'full stack' },
-            check('Cho phép gửi cấu hình router (đã xoá mật khẩu, khoá, PSK) tới Anthropic để phân tích', aiConsent),
-            check('Che IP public và địa chỉ MAC trước khi gửi (khuyên dùng; báo cáo vẫn hiện giá trị thật)', aiAnon),
-            check('Tự động kiểm tra mọi router sáng Chủ nhật hằng tuần và gửi tóm tắt qua Telegram/Zalo', autoAudit)),
-          h('p', { class: 'hint full' }, 'Tạo API key tại console.anthropic.com → API Keys (cần nạp credit). Mỗi lần kiểm tra bằng AI thường tốn khoảng vài nghìn đồng đến vài chục nghìn đồng tuỳ mô hình và độ lớn cấu hình; chi phí ước tính hiện trong từng báo cáo. Không bật AI thì vẫn chạy được bộ kiểm tra có sẵn (miễn phí).')));
+      const provs = d.aiProviders || [];
+      const setDefault = async pid => { try { await api('PUT', '/api/admin/ai/default', { id: pid }); built = false; refresh(); } catch (e) { toast(e.message, 'bad'); } };
+      const aiPanel = h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Trợ lý AI kiểm tra router'),
+        h('span', { class: 'muted small' }, 'Claude, ChatGPT, Gemini, DeepSeek, Grok, Mistral, Ollama…'), h('div', { class: 'grow' }),
+        h('button', { type: 'button', class: 'primary', onclick: () => aiAccountForm({}, () => { built = false; refresh(); }) }, '+ Thêm tài khoản AI')),
+        provs.length ? table([
+          { t: 'Mặc định', r: p => h('input', { type: 'radio', name: 'ai-default', checked: p.id === st.aiDefault, onchange: () => setDefault(p.id), title: 'Dùng tài khoản này khi chạy kiểm tra' }) },
+          { t: 'Tài khoản', v: p => p.name, r: p => h('div', null, h('b', null, p.name), h('div', { class: 'muted small' }, p.kind === 'anthropic' ? 'Anthropic (SDK chính thức)' : p.baseUrl)) },
+          { t: 'Mô hình', v: p => p.model, r: p => h('span', { class: 'mono small' }, p.model || '– chưa chọn –') },
+          { t: 'Trạng thái', v: p => p.usable ? 1 : 0, r: p => !p.enabled ? badge('disabled', 'Tắt') : !p.keyOk ? badge('down', 'Key hỏng') : p.usable ? badge('up', p.hasKey ? 'Sẵn sàng' : 'Sẵn sàng (không key)') : badge('waiting', 'Thiếu mô hình') },
+          { t: '', r: p => h('button', { type: 'button', class: 'sm', onclick: () => aiAccountForm(p, () => { built = false; refresh(); }) }, 'Sửa') },
+        ], provs) : h('div', { class: 'empty' }, 'Chưa có tài khoản AI. Không có AI thì báo cáo chỉ gồm bộ kiểm tra có sẵn (miễn phí).'),
+        h('div', { class: 'panel-b stack' },
+          check('Cho phép gửi cấu hình router (đã xoá mật khẩu, khoá, PSK) tới nhà cung cấp AI đã chọn để phân tích', aiConsent),
+          check('Che IP public và địa chỉ MAC trước khi gửi (khuyên dùng; báo cáo vẫn hiện giá trị thật)', aiAnon),
+          check('Nếu tài khoản AI đang chọn bị lỗi (hết credit, key sai, quá tải), tự chuyển sang tài khoản khác', aiFallback),
+          check('Tự động kiểm tra mọi router sáng Chủ nhật hằng tuần và gửi tóm tắt qua Telegram/Zalo', autoAudit),
+          h('p', { class: 'hint' }, 'Chi phí ước tính hiện trong từng báo cáo (với tài khoản ngoài Claude, nhập giá trong phần Sửa để tính). Ollama/LM Studio chạy trên máy của bạn: dữ liệu không ra khỏi mạng nội bộ, nhưng cần mô hình đủ mạnh và hỗ trợ gọi công cụ (tools).')));
       const sumOn = h('input', { type: 'checkbox', checked: st.summaryOn });
       const sumAt = h('input', { type: 'time', value: st.summaryAt });
       const notifyNew = h('input', { type: 'checkbox', checked: st.notifyNew });
@@ -1301,8 +1315,7 @@ function settingsPage() {
       const form = h('form', { class: 'stack', onsubmit: e => { e.preventDefault(); busy(save, async () => {
         const body = { adminChat: inputs.telegram.chat.value, zaloAdmin: inputs.zalo.chat.value, summaryOn: sumOn.checked, summaryAt: sumAt.value, notifyNew: notifyNew.checked,
           repeatMin: +repeat.value, timezone: tz.value, retentionDays: +keep.value, pushBase: base.value,
-          aiModel: aiModel.value, aiConsent: aiConsent.checked, aiAnonymize: aiAnon.checked, autoAudit: autoAudit.checked };
-        if (aiRemove.checked) body.aiKey = ''; else if (aiKey.value) body.aiKey = aiKey.value;
+          aiFallback: aiFallback.checked, aiConsent: aiConsent.checked, aiAnonymize: aiAnon.checked, autoAudit: autoAudit.checked };
         for (const c of CH) {
           const i = inputs[c.k];
           if (i.remove.checked) body[c.tokenKey] = ''; else if (i.token.value) body[c.tokenKey] = i.token.value;
@@ -1333,6 +1346,79 @@ function settingsPage() {
       fill(box, h('div', { class: 'stack' }, form, backup));
     },
   };
+}
+
+// ---------- AI accounts ----------
+const AI_PRESETS = [
+  { k: 'anthropic', name: 'Claude (Anthropic)', kind: 'anthropic', base: '', model: 'claude-opus-5-5', key: 'console.anthropic.com → API Keys' },
+  { k: 'openai', name: 'ChatGPT (OpenAI)', kind: 'openai', base: 'https://api.openai.com/v1', key: 'platform.openai.com → API keys' },
+  { k: 'gemini', name: 'Gemini (Google)', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai', key: 'aistudio.google.com → Get API key' },
+  { k: 'deepseek', name: 'DeepSeek', kind: 'openai', base: 'https://api.deepseek.com/v1', key: 'platform.deepseek.com → API keys' },
+  { k: 'xai', name: 'Grok (xAI)', kind: 'openai', base: 'https://api.x.ai/v1', key: 'console.x.ai → API Keys' },
+  { k: 'mistral', name: 'Mistral', kind: 'openai', base: 'https://api.mistral.ai/v1', key: 'console.mistral.ai → API Keys' },
+  { k: 'groq', name: 'Groq', kind: 'openai', base: 'https://api.groq.com/openai/v1', key: 'console.groq.com → API Keys' },
+  { k: 'openrouter', name: 'OpenRouter (nhiều mô hình)', kind: 'openai', base: 'https://openrouter.ai/api/v1', key: 'openrouter.ai → Keys' },
+  { k: 'qwen', name: 'Qwen (Alibaba Cloud)', kind: 'openai', base: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', key: 'Alibaba Cloud Model Studio → API Key' },
+  { k: 'ollama', name: 'Ollama (máy cục bộ)', kind: 'openai', base: 'http://localhost:11434/v1', key: 'không cần key', local: true },
+  { k: 'lmstudio', name: 'LM Studio (máy cục bộ)', kind: 'openai', base: 'http://localhost:1234/v1', key: 'không cần key', local: true },
+  { k: 'custom', name: 'Khác (tương thích OpenAI)', kind: 'openai', base: '', key: 'theo nhà cung cấp' },
+];
+
+function aiAccountForm(p, done) {
+  const isNew = !p.id;
+  const preset = h('select', null, AI_PRESETS.map(x => h('option', { value: x.k, selected: !isNew && (p.kind === 'anthropic' ? x.k === 'anthropic' : x.base === p.baseUrl) }, x.name)));
+  const name = h('input', { value: p.name || '', maxlength: 40, required: true });
+  const base = h('input', { value: p.baseUrl || '', class: 'mono', placeholder: 'https://…/v1' });
+  const key = h('input', { type: 'password', autocomplete: 'off', placeholder: p.hasKey ? '(đã lưu – để trống để giữ nguyên)' : 'API key' });
+  const removeKey = h('input', { type: 'checkbox' });
+  const models = h('datalist', { id: 'np-ai-models' });
+  const model = h('input', { value: p.model || '', class: 'mono', list: 'np-ai-models', placeholder: 'chọn sau khi bấm “Kiểm tra & lấy danh sách”' });
+  const priceIn = h('input', { type: 'number', min: 0, step: 'any', value: p.priceIn || '', placeholder: 'tuỳ chọn' });
+  const priceOut = h('input', { type: 'number', min: 0, step: 'any', value: p.priceOut || '', placeholder: 'tuỳ chọn' });
+  const enabled = h('input', { type: 'checkbox', checked: isNew ? true : p.enabled });
+  const keyHint = h('p', { class: 'hint full' });
+  const testOut = h('div', { class: 'full' });
+  const cur = () => AI_PRESETS.find(x => x.k === preset.value);
+  const sync = (fromPreset) => {
+    const x = cur();
+    base.closest('label').classList.toggle('hidden', x.kind === 'anthropic');
+    if (fromPreset) {
+      if (!name.value || AI_PRESETS.some(y => y.name === name.value)) name.value = x.name;
+      if (x.kind === 'openai' && x.base) base.value = x.base;
+      model.value = x.model || '';
+      fill(models);
+    }
+    fill(keyHint, 'Lấy API key: ', h('b', null, x.key), x.local ? '. Địa chỉ “localhost” là máy đang chạy NetPulse; nếu AI chạy ở máy khác, đổi thành IP máy đó.' : '');
+  };
+  preset.addEventListener('change', () => sync(true));
+  const collect = () => {
+    const x = cur();
+    const b = { id: p.id || '', name: name.value, kind: x.kind, baseUrl: base.value, model: model.value, priceIn: +priceIn.value || 0, priceOut: +priceOut.value || 0, enabled: enabled.checked };
+    if (removeKey.checked) b.key = ''; else if (key.value) b.key = key.value;
+    return b;
+  };
+  const actions = [{ t: 'Huỷ', fn: c => c() }, { t: isNew ? 'Thêm tài khoản' : 'Lưu', cls: 'primary', submit: true, fn: async close => {
+    try { await api('POST', '/api/admin/ai/providers', collect()); close(); toast('Đã lưu tài khoản AI', 'ok'); done(); } catch (e) { toast(e.message, 'bad'); }
+  } }];
+  if (!isNew) actions.unshift({ t: 'Xoá', cls: 'danger', fn: async close => {
+    if (!confirm(`Xoá tài khoản AI “${p.name}”?`)) return;
+    try { await api('DELETE', `/api/admin/ai/providers/${p.id}`); close(); done(); } catch (e) { toast(e.message, 'bad'); }
+  } });
+  modal(isNew ? 'Thêm tài khoản AI' : 'Sửa tài khoản AI: ' + p.name, h('div', { class: 'form' },
+    field('Nhà cung cấp', preset, 'full'), field('Tên hiển thị', name), field('Địa chỉ API (OpenAI-compatible)', base),
+    field('API key', key), p.hasKey ? h('div', null, check('Xoá key đã lưu', removeKey)) : null, keyHint,
+    h('div', { class: 'full row' }, h('button', { type: 'button', onclick: e => busy(e.target, async () => {
+      const res = await api('POST', '/api/admin/ai/models', collect());
+      fill(models, res.models.map(m => h('option', { value: m })));
+      if (!model.value && res.models.length) model.value = res.models[0];
+      fill(testOut, h('div', { class: 'box ok' }, `✓ Key hợp lệ · ${res.models.length} mô hình. Gõ hoặc chọn trong ô Mô hình.`,
+        h('div', { class: 'muted small' }, res.models.slice(0, 40).join(' · ') + (res.models.length > 40 ? ' …' : ''))));
+    }) }, 'Kiểm tra & lấy danh sách mô hình'), testOut),
+    field('Mô hình', model, 'full'), models,
+    field('Giá đầu vào (USD / 1 triệu token)', priceIn), field('Giá đầu ra (USD / 1 triệu token)', priceOut),
+    h('div', { class: 'full' }, check('Đang dùng', enabled)),
+    h('p', { class: 'hint full' }, 'Mô hình cần hỗ trợ gọi công cụ (tools / function calling). Nên chọn mô hình mạnh nhất của nhà cung cấp cho phân tích bảo mật. Giá chỉ dùng để ước tính chi phí; Claude có sẵn giá.')), actions);
+  sync(isNew); // after the form is in the modal (sync looks up the field labels)
 }
 
 // ---------- account ----------
