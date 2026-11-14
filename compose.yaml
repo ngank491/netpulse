@@ -1,0 +1,20 @@
+services:
+  netpulse:
+    image: ghcr.io/OWNER/netpulse:latest   # hoặc: build: .
+    container_name: netpulse
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      # Bỏ trống để dùng mã khởi tạo hiện trong log (docker logs netpulse)
+      # NETPULSE_ADMIN_PASSWORD: "doi-mat-khau-nay"
+      # NETPULSE_TLS: auto            # HTTPS tự ký
+      # NETPULSE_TRUST_PROXY: "true"  # nếu đứng sau reverse proxy
+    volumes:
+      - netpulse-data:/data
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }
+volumes:
+  netpulse-data:
