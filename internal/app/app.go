@@ -230,13 +230,19 @@ func Run(ctx context.Context, cfg *Config) error {
 	hub := NewHub(st, box, settings, cfg.Demo)
 	notifier := NewNotifier(st, settings)
 	hub.notify, notifier.hub = notifier, hub
-	srv.hub, srv.n = hub, notifier
+	auditor := NewAuditor(hub, st, settings, notifier)
+	srv.hub, srv.n, srv.audit = hub, notifier, auditor
+	if err := st.FailStaleAudits(); err != nil {
+		return err
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if err := hub.Start(runCtx); err != nil {
 		return err
 	}
+	auditor.ctx = runCtx
+	go auditor.Run(runCtx)
 	go notifier.Run(runCtx)
 	go notifier.RunBots(runCtx)
 

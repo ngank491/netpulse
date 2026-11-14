@@ -22,10 +22,16 @@ type Settings struct {
 	Timezone      string `json:"timezone"`
 	RetentionDays int    `json:"retentionDays"`
 	PushBase      string `json:"pushBase"`
+	AIKey         string `json:"aiKey"` // Anthropic API key, sealed with Box
+	AIModel       string `json:"aiModel"`
+	AIConsent     bool   `json:"aiConsent"`   // admin agreed to send (redacted) router config to Anthropic
+	AIAnonymize   bool   `json:"aiAnonymize"` // replace public IPs/MACs with placeholders
+	AutoAudit     bool   `json:"autoAudit"`   // weekly audit on Sunday morning
 }
 
 func defaultSettings() Settings {
-	return Settings{SummaryOn: true, SummaryAt: "08:00", RepeatMin: 30, Timezone: "Asia/Ho_Chi_Minh", RetentionDays: 30}
+	return Settings{SummaryOn: true, SummaryAt: "08:00", RepeatMin: 30, Timezone: "Asia/Ho_Chi_Minh", RetentionDays: 30,
+		AIModel: "claude-opus-5-5", AIAnonymize: true}
 }
 
 type SettingsStore struct {
@@ -78,6 +84,15 @@ func (s *SettingsStore) Token(channel string) string {
 	return t
 }
 
+// AIKey returns the decrypted Anthropic API key ("" when unset).
+func (s *SettingsStore) AIKey() string {
+	k, err := s.box.Open(s.Get().AIKey)
+	if err != nil {
+		return ""
+	}
+	return k
+}
+
 // AdminChat returns the admin chat of a channel.
 func (s *SettingsStore) AdminChat(channel string) string {
 	if channel == "zalo" {
@@ -108,6 +123,11 @@ type SettingsInput struct {
 	Timezone      string  `json:"timezone"`
 	RetentionDays int     `json:"retentionDays"`
 	PushBase      string  `json:"pushBase"`
+	AIKey         *string `json:"aiKey"`
+	AIModel       string  `json:"aiModel"`
+	AIConsent     bool    `json:"aiConsent"`
+	AIAnonymize   bool    `json:"aiAnonymize"`
+	AutoAudit     bool    `json:"autoAudit"`
 }
 
 func (s *SettingsStore) Update(in SettingsInput) error {
@@ -156,6 +176,20 @@ func (s *SettingsStore) Update(in SettingsInput) error {
 		next.ZaloToken = s.box.Seal(t)
 	}
 	next.ZaloAdmin, next.NotifyNew = in.ZaloAdmin, in.NotifyNew
+	if in.AIKey != nil {
+		k := strings.TrimSpace(*in.AIKey)
+		if k != "" && (len(k) < 20 || len(k) > 300 || strings.ContainsAny(k, " \t\r\n")) {
+			return errors.New("API key Anthropic không đúng định dạng")
+		}
+		next.AIKey = s.box.Seal(k)
+	}
+	if in.AIModel == "" {
+		in.AIModel = "claude-opus-5-5"
+	}
+	if _, ok := aiModels[in.AIModel]; !ok {
+		return errors.New("mô hình AI không hợp lệ")
+	}
+	next.AIModel, next.AIConsent, next.AIAnonymize, next.AutoAudit = in.AIModel, in.AIConsent, in.AIAnonymize, in.AutoAudit
 	next.AdminChat, next.SummaryOn, next.SummaryAt = in.AdminChat, in.SummaryOn, in.SummaryAt
 	next.RepeatMin, next.Timezone, next.RetentionDays, next.PushBase = in.RepeatMin, in.Timezone, in.RetentionDays, in.PushBase
 	if err := s.st.SetJSON("settings", next); err != nil {

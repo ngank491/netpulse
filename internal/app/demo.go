@@ -97,6 +97,51 @@ func (d *demoSource) Fetch(ctx context.Context, path string, _ []string) ([]Row,
 		return []Row{{"interface": "bridge-lan", "address": "192.168.88.2", "identity": "SW-CoreTang1", "platform": "MikroTik", "board": "CRS326-24G-2S+"}}, nil
 	case "/system/identity":
 		return []Row{{"name": "Demo-VanPhong"}}, nil
+	// read-only configuration used by the security/performance audit (deliberately imperfect)
+	case "/ip/service":
+		return []Row{{"name": "telnet", "port": "23", "disabled": "false"}, {"name": "ftp", "port": "21", "disabled": "true"},
+			{"name": "www", "port": "80", "disabled": "false"}, {"name": "ssh", "port": "22", "disabled": "false"},
+			{"name": "www-ssl", "port": "443", "disabled": "true"}, {"name": "api", "port": "8728", "disabled": "true"},
+			{"name": "winbox", "port": "8291", "disabled": "false"}, {"name": "api-ssl", "port": "8729", "disabled": "true"}}, nil
+	case "/user":
+		return []Row{{"name": "admin", "group": "full", "disabled": "false", "last-logged-in": "2026-11-13 09:12:01"},
+			{"name": "ktv", "group": "full", "address": "192.168.88.0/24", "disabled": "false"}}, nil
+	case "/user/group":
+		return []Row{{"name": "full", "policy": "local,telnet,ssh,ftp,reboot,read,write,policy,test,winbox,password,web,sniff,sensitive,api,romon,rest-api"}}, nil
+	case "/ip/dns":
+		return []Row{{"allow-remote-requests": "true", "servers": "8.8.8.8,1.1.1.1", "cache-size": "2048KiB"}}, nil
+	case "/ip/firewall/filter":
+		return []Row{
+			{"chain": "input", "action": "accept", "connection-state": "established,related", "comment": "accept established"},
+			{"chain": "input", "action": "accept", "protocol": "icmp"},
+			{"chain": "input", "action": "accept", "in-interface-list": "LAN"},
+			{"chain": "forward", "action": "accept", "connection-state": "established,related"},
+			{"chain": "forward", "action": "drop", "connection-state": "invalid"},
+			{"chain": "forward", "action": "fasttrack-connection", "dynamic": "true", "comment": "special dummy rule to show fasttrack counters"}}, nil
+	case "/ip/firewall/nat":
+		return []Row{{"chain": "srcnat", "action": "masquerade", "out-interface-list": "WAN"},
+			{"chain": "dstnat", "action": "dst-nat", "protocol": "tcp", "dst-port": "3389", "in-interface-list": "WAN", "to-addresses": "192.168.88.20", "to-ports": "3389", "comment": "RDP ke toan"},
+			{"chain": "dstnat", "action": "dst-nat", "protocol": "tcp", "dst-port": "8000", "in-interface-list": "WAN", "to-addresses": "10.10.10.11", "to-ports": "8000", "comment": "camera"}}, nil
+	case "/ip/firewall/connection/tracking":
+		return []Row{{"enabled": "auto", "total-entries": "4210", "max-entries": "1048576"}}, nil
+	case "/ip/socks":
+		return []Row{{"enabled": "false", "port": "1080"}}, nil
+	case "/ip/upnp":
+		return []Row{{"enabled": "true"}}, nil
+	case "/tool/mac-server/mac-winbox":
+		return []Row{{"allowed-interface-list": "all"}}, nil
+	case "/ip/neighbor/discovery-settings":
+		return []Row{{"discover-interface-list": "LAN"}}, nil
+	case "/system/package/update":
+		return []Row{{"channel": "stable", "installed-version": "7.18.2", "latest-version": "7.20.4", "status": "New version is available"}}, nil
+	case "/system/routerboard":
+		return []Row{{"routerboard": "true", "model": "RB5009UG+S+", "current-firmware": "7.18.2", "upgrade-firmware": "7.18.2"}}, nil
+	case "/log":
+		var rows []Row
+		for i := 0; i < 24; i++ {
+			rows = append(rows, Row{"time": fmt.Sprintf("08:%02d:%02d", i, i*2), "topics": "system,error,critical", "message": fmt.Sprintf("login failure for user admin from 45.141.%d.17 via winbox", 80+i%3)})
+		}
+		return append(rows, Row{"time": "09:12:01", "topics": "system,info,account", "message": "user ktv logged in from 192.168.88.20 via winbox"}), nil
 	}
 	return nil, errNotSupported
 }

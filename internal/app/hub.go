@@ -292,18 +292,10 @@ func (h *Hub) Start(ctx context.Context) error {
 		return err
 	}
 	for _, r := range routers {
-		if err := h.load(r); err != nil {
+		if err := h.load(r, true); err != nil {
 			return err
 		}
-		if rs := h.get(r.ID); rs != nil && r.Enabled && rs.LastSeen > 0 {
-			// explains gaps in charts and history after an update or reboot of the server
-			gap := nowMs() - rs.LastSeen
-			msg := "NetPulse " + Version + " khởi động, tiếp tục giám sát"
-			if gap > 2*60_000 {
-				msg += " (đã gián đoạn " + humanDur(gap) + ")"
-			}
-			h.st.AddEvent(r.ID, nowMs(), "info", msg)
-		}
+
 	}
 	h.wg.Add(2)
 	go func() {
@@ -359,7 +351,7 @@ func (h *Hub) all() []*RState {
 	return out
 }
 
-func (h *Hub) load(r *Router) error {
+func (h *Hub) load(r *Router, onStart bool) error {
 	mons, err := h.st.ListMonitors(r.ID)
 	if err != nil {
 		return err
@@ -376,6 +368,16 @@ func (h *Hub) load(r *Router) error {
 	h.mu.Lock()
 	h.rs[r.ID] = rs
 	h.mu.Unlock()
+	if onStart && r.Enabled && rs.LastSeen > 0 {
+		// explains gaps in charts and history after an update or reboot of the server;
+		// read before the poll loop starts touching rs
+		gap := nowMs() - rs.LastSeen
+		msg := "NetPulse " + Version + " khởi động, tiếp tục giám sát"
+		if gap > 2*60_000 {
+			msg += " (đã gián đoạn " + humanDur(gap) + ")"
+		}
+		h.st.AddEvent(r.ID, nowMs(), "info", msg)
+	}
 	h.startLoop(rs)
 	return nil
 }
@@ -399,7 +401,7 @@ func (h *Hub) Reload(id int64) error {
 	}
 	rs := h.get(id)
 	if rs == nil {
-		return h.load(r)
+		return h.load(r, false)
 	}
 	mons, err := h.st.ListMonitors(id)
 	if err != nil {

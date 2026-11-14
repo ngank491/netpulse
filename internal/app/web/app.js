@@ -360,12 +360,12 @@ function eventsPage() {
 }
 
 // ---------- router page ----------
-const TABS = [['overview', 'Tổng quan'], ['wan', 'WAN'], ['devices', 'Thiết bị'], ['map', 'Sơ đồ'], ['ports', 'Cổng'], ['clients', 'Client'], ['ppp', 'PPPoE'], ['ip', 'IP & định tuyến'], ['events', 'Sự kiện']];
+const TABS = [['overview', 'Tổng quan'], ['wan', 'WAN'], ['devices', 'Thiết bị'], ['map', 'Sơ đồ'], ['ports', 'Cổng'], ['clients', 'Client'], ['ppp', 'PPPoE'], ['ip', 'IP & định tuyến'], ['audit', 'Kiểm tra AI'], ['events', 'Sự kiện']];
 
 function routerPage(id, tab) {
   if (!TABS.some(t => t[0] === tab)) tab = 'overview';
   let head, tabsEl, body, view;
-  const t = ({ overview: tabOverview, wan: tabWan, devices: tabDevices, map: tabMap, ports: tabPorts, clients: tabClients, ppp: tabPpp, ip: tabIp, events: tabEvents })[tab](id);
+  const t = ({ overview: tabOverview, wan: tabWan, devices: tabDevices, map: tabMap, ports: tabPorts, clients: tabClients, ppp: tabPpp, ip: tabIp, audit: tabAudit, events: tabEvents })[tab](id);
   return {
     every: 5000,
     mount(main) {
@@ -816,6 +816,159 @@ function tabIp(id) {
   };
 }
 
+// --- audit tab (security & performance, optional AI agent)
+const SEV = { critical: ['down', 'Nghiêm trọng'], high: ['down', 'Cao'], medium: ['waiting', 'Trung bình'], low: ['unknown', 'Thấp'], info: ['unknown', 'Thông tin'] };
+const AREA = { security: 'Bảo mật', performance: 'Hiệu suất', reliability: 'Độ ổn định' };
+
+// md renders a small, safe subset of Markdown into DOM nodes (no innerHTML).
+function md(text) {
+  const root = h('div', { class: 'md' });
+  const inline = str => {
+    const out = [];
+    const re = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+    let last = 0, m;
+    while ((m = re.exec(str))) {
+      if (m.index > last) out.push(str.slice(last, m.index));
+      const t = m[0];
+      out.push(t[0] === '`' ? h('code', null, t.slice(1, -1)) : h('b', null, t.slice(2, -2)));
+      last = m.index + t.length;
+    }
+    if (last < str.length) out.push(str.slice(last));
+    return out;
+  };
+  const lines = String(text || '').replace(/\r/g, '').split('\n');
+  let list = null, para = [];
+  const flushPara = () => { if (para.length) { root.append(h('p', null, inline(para.join(' ')))); para = []; } };
+  const flushList = () => { list = null; };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      flushPara(); flushList();
+      const code = [];
+      while (++i < lines.length && !/^```/.test(lines[i])) code.push(lines[i]);
+      root.append(codeBlock(code.join('\n')));
+      continue;
+    }
+    if (/^\|.*\|\s*$/.test(line)) {
+      flushPara(); flushList();
+      const rows = [];
+      while (i < lines.length && /^\|.*\|\s*$/.test(lines[i])) { rows.push(lines[i]); i++; }
+      i--;
+      const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(x => x.trim());
+      const body = rows.filter(r => !/^\|[\s:|-]+\|$/.test(r.trim()));
+      root.append(h('div', { class: 'tw' }, h('table', null,
+        h('thead', null, h('tr', null, cells(body[0] || '').map(x => h('th', null, inline(x))))),
+        h('tbody', null, body.slice(1).map(r => h('tr', null, cells(r).map(x => h('td', null, inline(x)))))))));
+      continue;
+    }
+    let m;
+    if ((m = /^(#{1,4})\s+(.*)/.exec(line))) { flushPara(); flushList(); root.append(h('h' + Math.min(m[1].length + 1, 4), null, inline(m[2]))); continue; }
+    if ((m = /^\s*([-*]|\d+[.)])\s+(.*)/.exec(line))) {
+      flushPara();
+      const ordered = /\d/.test(m[1]);
+      if (!list || list.ordered !== ordered) { list = { el: h(ordered ? 'ol' : 'ul'), ordered }; root.append(list.el); }
+      list.el.append(h('li', null, inline(m[2])));
+      continue;
+    }
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+    flushList(); para.push(line.trim());
+  }
+  flushPara();
+  return root;
+}
+
+function codeBlock(text) {
+  const pre = h('pre', { title: 'Bấm để chọn toàn bộ' }, text);
+  pre.addEventListener('click', () => { const r = document.createRange(); r.selectNodeContents(pre); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); });
+  const copy = h('button', { type: 'button', class: 'sm copy', onclick: async () => {
+    try { await navigator.clipboard.writeText(text); toast('Đã sao chép lệnh', 'ok'); }
+    catch { pre.click(); toast('Đã chọn lệnh – nhấn Ctrl+C để sao chép'); }
+  } }, 'Sao chép');
+  return h('div', { class: 'codewrap' }, copy, pre);
+}
+
+function scoreCard(label, v) {
+  const cls = v >= 80 ? 'up' : v >= 50 ? 'waiting' : 'down';
+  return h('div', { class: 'tile score ' + cls }, h('div', { class: 'k' }, label), h('div', { class: 'v' }, v, h('span', { class: 'muted small' }, '/100')));
+}
+
+function tabAudit(id) {
+  let head, body, histSel, runBtn, cur = null, lastList = 0, info = null, loadedId = 0;
+  const showReport = async aid => {
+    try { cur = await api('GET', `/api/audits/${aid}`); loadedId = aid; render(); } catch (e) { toast(e.message, 'bad'); }
+  };
+  const render = () => {
+    if (!info) return;
+    const running = info.running;
+    runBtn && (runBtn.disabled = !!running);
+    const parts = [];
+    if (running) parts.push(h('div', { class: 'box' }, h('b', null, '⏳ Đang kiểm tra… '), running.progress || '',
+      running.steps && running.steps.length ? h('div', { class: 'muted small' }, 'Đã xem: ' + running.steps.join(' · ')) : null));
+    if (!info.aiReady && me.role === 'admin') parts.push(h('div', { class: 'hint' }, 'Trợ lý AI chưa bật: báo cáo chỉ dùng bộ kiểm tra có sẵn (miễn phí, chạy trên máy này). ', h('a', { href: '#/admin/settings' }, 'Bật trợ lý AI trong Cài đặt →')));
+    if (!cur) {
+      parts.push(h('div', { class: 'panel panel-b empty' }, info.reports.length ? 'Chọn một báo cáo.' : 'Chưa có báo cáo. ' + (me.role === 'admin' ? 'Bấm “Chạy kiểm tra” để bắt đầu.' : '')));
+      fill(body, parts);
+      return;
+    }
+    const r = cur;
+    const findings = r.findings || [];
+    const u = r.usage;
+    parts.push(h('div', { class: 'grid tiles' }, scoreCard('Bảo mật', r.secScore), scoreCard('Hiệu suất & ổn định', r.perfScore),
+      h('div', { class: 'tile' }, h('div', { class: 'k' }, 'Nguồn'), h('div', { class: 'v sm' }, r.source === 'ai' ? 'Trợ lý AI · ' + (r.model || '') : 'Bộ kiểm tra có sẵn'),
+        h('div', { class: 'muted small' }, fmtTime(r.startedAt) + (r.trigger === 'weekly' ? ' · định kỳ' : ''))),
+      u ? h('div', { class: 'tile' }, h('div', { class: 'k' }, 'Chi phí AI (ước tính)'), h('div', { class: 'v sm' }, '$' + u.costUsd.toFixed(3)),
+        h('div', { class: 'muted small' }, `${Math.round((u.inputTokens + u.cacheRead + u.cacheWrite) / 1000)}k vào · ${Math.round(u.outputTokens / 1000)}k ra · ${u.turns} lượt`)) : null));
+    if (r.summary) parts.push(h('div', { class: 'panel panel-b' }, h('b', null, 'Tóm tắt: '), r.summary));
+    if (r.error) parts.push(h('div', { class: 'box bad' }, r.error));
+    if (r.note) parts.push(h('div', { class: 'hint' }, r.note));
+    const fp = tablePanel('Vấn đề và cách khắc phục', 'audit-f-' + id);
+    fp.draw([
+      { t: 'Mức', v: f => -({ critical: 4, high: 3, medium: 2, low: 1, info: 0 })[f.severity], r: f => badge(SEV[f.severity][0], SEV[f.severity][1]) },
+      { t: 'Loại', v: f => AREA[f.area] || f.area },
+      { t: 'Vấn đề', v: f => f.title + ' ' + f.evidence, r: f => h('div', null, h('b', null, f.title), f.evidence ? h('div', { class: 'muted small' }, f.evidence) : null) },
+      { t: 'Cách khắc phục', v: f => f.fix, r: f => h('div', { class: 'fix' }, f.fix, f.commands && f.commands.length ? codeBlock(f.commands.join('\n')) : null) },
+    ], findings, { empty: 'Không phát hiện vấn đề.' });
+    if (fp.state.sort == null) { fp.state.sort = 0; fp.redraw(); }
+    parts.push(fp.el);
+    if (r.markdown) parts.push(h('details', { class: 'panel', open: r.source === 'ai' }, h('summary', { class: 'panel-h' }, h('h2', null, 'Báo cáo đầy đủ')), h('div', { class: 'panel-b' }, md(r.markdown))));
+    if (r.source === 'ai' && (r.ruleFindings || []).length) parts.push(h('details', { class: 'panel' }, h('summary', { class: 'panel-h' }, h('h2', null, `Kết quả bộ kiểm tra có sẵn (${r.ruleFindings.length})`)),
+      h('div', { class: 'panel-b' }, h('ul', null, r.ruleFindings.map(f => h('li', null, badge(SEV[f.severity][0], SEV[f.severity][1]), ' ', f.title))))));
+    if (r.steps && r.steps.length) parts.push(h('p', { class: 'hint' }, 'Trợ lý AI đã xem: ' + r.steps.join(' · ') + '. Dữ liệu được đọc một lần ở chế độ chỉ đọc; mật khẩu và khoá không được gửi đi.'));
+    if (me.role === 'admin') parts.push(h('div', null, h('button', { class: 'sm danger', onclick: async () => {
+      if (!confirm('Xoá báo cáo này?')) return;
+      await api('DELETE', `/api/admin/audits/${r.id}`).catch(e => toast(e.message, 'bad'));
+      cur = null; loadedId = 0; lastList = 0; refresh();
+    } }, 'Xoá báo cáo')));
+    fill(body, parts);
+  };
+  return {
+    mount(el) {
+      head = h('div', { class: 'row' });
+      body = h('div', { class: 'stack' });
+      histSel = h('select', { class: 'search', onchange: e => e.target.value && showReport(+e.target.value) });
+      runBtn = me.role === 'admin' ? h('button', { class: 'primary', onclick: e => busy(e.target, async () => {
+        await api('POST', `/api/admin/routers/${id}/audit`); lastList = 0; cur = null; loadedId = 0; toast('Đã bắt đầu kiểm tra', 'ok'); refresh();
+      }) }, 'Chạy kiểm tra') : null;
+      el.append(h('div', { class: 'stack' }, h('div', { class: 'panel' }, h('div', { class: 'panel-h' },
+        h('h2', null, 'Kiểm tra bảo mật & hiệu suất'), h('span', { class: 'muted small' }, 'đọc cấu hình ở chế độ chỉ đọc, không thay đổi router'),
+        h('div', { class: 'grow' }), histSel, runBtn)), body));
+    },
+    async update() {
+      const wasRunning = info && info.running;
+      if (Date.now() - lastList < 4000 && !wasRunning) return;
+      lastList = Date.now();
+      try { info = await api('GET', `/api/routers/${id}/audits`); } catch (e) { return toast(e.message, 'bad'); }
+      const opts = info.reports.map(r => h('option', { value: r.id, selected: r.id === loadedId },
+        `${fmtTime(r.startedAt)} · ${r.status === 'running' ? 'đang chạy' : r.status === 'error' ? 'lỗi' : `bảo mật ${r.secScore} · hiệu suất ${r.perfScore}`}${r.source === 'ai' ? ' · AI' : ''}`));
+      fill(histSel, info.reports.length ? opts : h('option', { value: '' }, 'Chưa có báo cáo'));
+      const newest = info.reports.find(r => r.status !== 'running');
+      if (wasRunning && !info.running && newest) { await showReport(newest.id); return; }
+      if (!loadedId && newest) { await showReport(newest.id); return; }
+      render();
+    },
+  };
+}
+
 // --- events tab
 function tabEvents(id) {
   let panel, last = 0;
@@ -1119,6 +1272,23 @@ function settingsPage() {
             }) }, 'Gửi tin thử'), h('span', { class: 'hint' }, 'Lưu cài đặt trước khi gửi thử.')),
             h('p', { class: 'hint full' }, c.how)));
       };
+      const aiKey = h('input', { type: 'password', autocomplete: 'off', placeholder: d.hasAIKey ? '(đã lưu – để trống để giữ nguyên)' : 'sk-ant-…' });
+      const aiRemove = h('input', { type: 'checkbox' });
+      const aiModel = h('select', null, [['claude-opus-5-5', 'Claude Opus 5.5 – phân tích kỹ nhất (khuyên dùng)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 – nhanh, rẻ hơn'], ['claude-haiku-5-5', 'Claude Haiku 5.5 – rẻ nhất, phân tích đơn giản']]
+        .map(([v, t]) => h('option', { value: v, selected: (st.aiModel || 'claude-opus-5-5') === v }, t)));
+      const aiConsent = h('input', { type: 'checkbox', checked: st.aiConsent });
+      const aiAnon = h('input', { type: 'checkbox', checked: st.aiAnonymize });
+      const autoAudit = h('input', { type: 'checkbox', checked: st.autoAudit });
+      const aiPanel = h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Trợ lý AI kiểm tra router (Claude)'),
+        d.hasAIKey ? badge(d.aiKeyOk ? 'up' : 'down', d.aiKeyOk ? 'Đã có API key' : 'Không giải mã được key') : badge('unknown', 'Chưa cấu hình')),
+        h('div', { class: 'panel-b form' },
+          field('Anthropic API key', aiKey), field('Mô hình', aiModel),
+          d.hasAIKey ? h('div', { class: 'full' }, check('Xoá API key đã lưu', aiRemove)) : null,
+          h('div', { class: 'full stack' },
+            check('Cho phép gửi cấu hình router (đã xoá mật khẩu, khoá, PSK) tới Anthropic để phân tích', aiConsent),
+            check('Che IP public và địa chỉ MAC trước khi gửi (khuyên dùng; báo cáo vẫn hiện giá trị thật)', aiAnon),
+            check('Tự động kiểm tra mọi router sáng Chủ nhật hằng tuần và gửi tóm tắt qua Telegram/Zalo', autoAudit)),
+          h('p', { class: 'hint full' }, 'Tạo API key tại console.anthropic.com → API Keys (cần nạp credit). Mỗi lần kiểm tra bằng AI thường tốn khoảng vài nghìn đồng đến vài chục nghìn đồng tuỳ mô hình và độ lớn cấu hình; chi phí ước tính hiện trong từng báo cáo. Không bật AI thì vẫn chạy được bộ kiểm tra có sẵn (miễn phí).')));
       const sumOn = h('input', { type: 'checkbox', checked: st.summaryOn });
       const sumAt = h('input', { type: 'time', value: st.summaryAt });
       const notifyNew = h('input', { type: 'checkbox', checked: st.notifyNew });
@@ -1130,7 +1300,9 @@ function settingsPage() {
       const recentPanel = h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Tin nhắn gần đây gửi tới bot'), h('span', { class: 'muted small' }, 'dùng để lấy Chat ID')), recentBox);
       const form = h('form', { class: 'stack', onsubmit: e => { e.preventDefault(); busy(save, async () => {
         const body = { adminChat: inputs.telegram.chat.value, zaloAdmin: inputs.zalo.chat.value, summaryOn: sumOn.checked, summaryAt: sumAt.value, notifyNew: notifyNew.checked,
-          repeatMin: +repeat.value, timezone: tz.value, retentionDays: +keep.value, pushBase: base.value };
+          repeatMin: +repeat.value, timezone: tz.value, retentionDays: +keep.value, pushBase: base.value,
+          aiModel: aiModel.value, aiConsent: aiConsent.checked, aiAnonymize: aiAnon.checked, autoAudit: autoAudit.checked };
+        if (aiRemove.checked) body.aiKey = ''; else if (aiKey.value) body.aiKey = aiKey.value;
         for (const c of CH) {
           const i = inputs[c.k];
           if (i.remove.checked) body[c.tokenKey] = ''; else if (i.token.value) body[c.tokenKey] = i.token.value;
@@ -1139,6 +1311,7 @@ function settingsPage() {
         built = false; page.update(res); toast('Đã lưu cài đặt', 'ok');
       }); } },
         h('div', { class: 'grid two' }, chPanel(CH[0]), chPanel(CH[1])),
+        aiPanel,
         recentPanel,
         h('div', { class: 'panel' }, h('div', { class: 'panel-h' }, h('h2', null, 'Khi nào gửi cảnh báo')),
           h('div', { class: 'panel-b form' },

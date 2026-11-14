@@ -189,3 +189,18 @@ label.cb { display: flex; gap: 8px; align-items: center; font-size: 13.5px; curs
   .search { max-width: none; }
   th, td { padding: 7px 8px; }
 }
+
+/* audit */
+.tile.score .v { font-size: 30px; }
+.tile.score.up .v { color: var(--up); } .tile.score.waiting .v { color: var(--warn); } .tile.score.down .v { color: var(--down); }
+.codewrap { position: relative; margin-top: 6px; }
+.codewrap pre { margin: 0; padding-right: 74px; cursor: text; }
+.codewrap .copy { position: absolute; top: 6px; right: 6px; }
+.fix { max-width: 560px; }
+.md h2 { font-size: 17px; margin: 18px 0 8px; } .md h3 { font-size: 15px; margin: 14px 0 6px; } .md h4 { font-size: 14px; margin: 12px 0 4px; }
+.md p, .md ul, .md ol { margin: 6px 0; } .md li { margin: 3px 0; }
+.md code { background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+details > summary { cursor: pointer; list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary h2::before { content: '▸ '; color: var(--muted); }
+details[open] > summary h2::before { content: '▾ '; }

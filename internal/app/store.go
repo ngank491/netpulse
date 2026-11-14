@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -120,6 +121,17 @@ CREATE TABLE client_alias(
   PRIMARY KEY(router_id, mac)) WITHOUT ROWID;
 `
 
+// schemaV3: security/performance audit reports.
+const schemaV3 = `
+CREATE TABLE audits(
+  id INTEGER PRIMARY KEY,
+  router_id INTEGER NOT NULL REFERENCES routers(id) ON DELETE CASCADE,
+  started_at INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  data TEXT NOT NULL);
+CREATE INDEX audits_router ON audits(router_id, started_at);
+`
+
 type Store struct{ db *sql.DB }
 
 func OpenStore(path string) (*Store, error) {
@@ -150,7 +162,7 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return err
 	}
-	migrations := []string{schemaV1, schemaV2}
+	migrations := []string{schemaV1, schemaV2, schemaV3}
 	if v > len(migrations) {
 		return fmt.Errorf("database được tạo bởi phiên bản mới hơn (schema %d)", v)
 	}
@@ -927,4 +939,94 @@ func (s *Store) SetAlias(routerID int64, mac, name string) error {
 	_, err := s.db.Exec(`INSERT INTO client_alias(router_id,mac,name) VALUES(?,?,?)
 		ON CONFLICT(router_id,mac) DO UPDATE SET name=excluded.name`, routerID, mac, name)
 	return err
+}
+
+// ---------- audit reports ----------
+
+func (s *Store) SaveAudit(r *AuditReport) (int64, error) {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return 0, err
+	}
+	if r.ID == 0 {
+		res, err := s.db.Exec("INSERT INTO audits(router_id,started_at,status,data) VALUES(?,?,?,?)", r.RouterID, r.StartedAt, r.Status, string(b))
+		if err != nil {
+			return 0, err
+		}
+		r.ID, err = res.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		b, _ = json.Marshal(r)
+	}
+	_, err = s.db.Exec("UPDATE audits SET status=?, data=? WHERE id=?", r.Status, string(b), r.ID)
+	return r.ID, err
+}
+
+func (s *Store) GetAudit(id int64) (*AuditReport, error) {
+	var d string
+	err := s.db.QueryRow("SELECT data FROM audits WHERE id=?", id).Scan(&d)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var r AuditReport
+	if err := json.Unmarshal([]byte(d), &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ListAudits returns light summaries (no markdown/findings) newest first.
+func (s *Store) ListAudits(routerID int64, limit int) ([]AuditReport, error) {
+	rows, err := s.db.Query("SELECT data FROM audits WHERE router_id=? ORDER BY started_at DESC LIMIT ?", routerID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AuditReport{}
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		var r AuditReport
+		if json.Unmarshal([]byte(d), &r) == nil {
+			r.Markdown, r.Steps = "", nil
+			counts := len(r.Findings)
+			r.Findings, r.RuleFindings = nil, nil
+			r.Progress = strconv.Itoa(counts)
+			out = append(out, r)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteAudit(id int64) error {
+	_, err := s.db.Exec("DELETE FROM audits WHERE id=?", id)
+	return err
+}
+
+// FailStaleAudits marks audits left "running" by a previous process.
+func (s *Store) FailStaleAudits() error {
+	rows, err := s.db.Query("SELECT id FROM audits WHERE status='running'")
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	for _, id := range ids {
+		if r, err := s.GetAudit(id); err == nil {
+			r.Status, r.Error, r.Progress, r.FinishedAt = "error", "Bị gián đoạn do NetPulse khởi động lại", "", nowMs()
+			s.SaveAudit(r)
+		}
+	}
+	return nil
 }

@@ -33,6 +33,7 @@ type Server struct {
 	box      *Box
 	hub      *Hub
 	n        *Notifier
+	audit    *Auditor
 	settings *SettingsStore
 	lim      *limiter
 	pwSem    chan struct{} // bounds concurrent PBKDF2 work
@@ -63,6 +64,10 @@ func (s *Server) Handler() http.Handler {
 	user("GET /api/routers/{id}", s.routerDetail)
 	user("GET /api/routers/{id}/history", s.history)
 	user("GET /api/events", s.events)
+	user("GET /api/routers/{id}/audits", s.listAudits)
+	user("GET /api/audits/{aid}", s.getAudit)
+	admin("POST /api/admin/routers/{id}/audit", s.startAudit)
+	admin("DELETE /api/admin/audits/{aid}", s.deleteAudit)
 
 	admin("GET /api/admin/routers", s.adminRouters)
 	admin("POST /api/admin/routers", s.saveRouter)
@@ -1042,7 +1047,10 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request, u *User) {
 		ok[ch] = !h || s.settings.Token(ch) != ""
 	}
 	cur.TGToken, cur.ZaloToken = "", ""
+	hasAI := cur.AIKey != ""
+	cur.AIKey = ""
 	writeJSON(w, 200, map[string]any{"settings": cur, "hasToken": has, "tokenOk": ok, "errors": s.n.LastErrors(),
+		"hasAIKey": hasAI, "aiKeyOk": !hasAI || s.settings.AIKey() != "", "aiModels": []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"},
 		"recentChats": s.n.Recent(), "version": Version, "dataDir": s.cfg.DataDir})
 }
 
@@ -1098,6 +1106,59 @@ func (s *Server) setClientName(w http.ResponseWriter, r *http.Request, u *User) 
 		return
 	}
 	if err := s.hub.SetAlias(id, mac, name); err != nil {
+		serverErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// ---------- audits ----------
+
+func (s *Server) startAudit(w http.ResponseWriter, r *http.Request, u *User) {
+	id, err := s.audit.Start(pathID(r, "id"), "manual")
+	if errors.Is(err, ErrNotFound) {
+		errJSON(w, 404, "không tìm thấy router")
+		return
+	}
+	if err != nil {
+		errJSON(w, 409, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]int64{"id": id})
+}
+
+func (s *Server) listAudits(w http.ResponseWriter, r *http.Request, u *User) {
+	id := pathID(r, "id")
+	if !u.CanSee(id) {
+		errJSON(w, 404, "không tìm thấy router")
+		return
+	}
+	list, err := s.st.ListAudits(id, 30)
+	if err != nil {
+		serverErr(w, err)
+		return
+	}
+	st := s.settings.Get()
+	writeJSON(w, 200, map[string]any{"running": s.audit.Running(id), "reports": list,
+		"aiReady": s.settings.AIKey() != "" && st.AIConsent, "aiModel": st.AIModel})
+}
+
+func (s *Server) getAudit(w http.ResponseWriter, r *http.Request, u *User) {
+	rep, err := s.st.GetAudit(pathID(r, "aid"))
+	if err != nil || !u.CanSee(rep.RouterID) {
+		errJSON(w, 404, "không tìm thấy báo cáo")
+		return
+	}
+	if rep.Status == "running" {
+		if live := s.audit.Running(rep.RouterID); live != nil && live.ID == rep.ID {
+			rep = live
+		}
+	}
+	writeJSON(w, 200, rep)
+}
+
+func (s *Server) deleteAudit(w http.ResponseWriter, r *http.Request, u *User) {
+	if err := s.st.DeleteAudit(pathID(r, "aid")); err != nil {
 		serverErr(w, err)
 		return
 	}

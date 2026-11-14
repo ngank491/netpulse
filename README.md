@@ -1,6 +1,6 @@
 # NetPulse – giám sát MikroTik gọn nhẹ
 
-Một file chạy duy nhất (~13 MB, ~16 MB RAM), không cần Node.js, Docker hay database riêng.
+Một file chạy duy nhất (~19 MB, ~20 MB RAM), không cần Node.js, Docker hay database riêng.
 Chạy trên Windows, Linux, macOS, Raspberry Pi, Docker và Home Assistant OS.
 
 ## Tính năng
@@ -20,6 +20,11 @@ Chạy trên Windows, Linux, macOS, Raspberry Pi, Docker và Home Assistant OS.
   - Kênh quản trị nhận mọi cảnh báo; mỗi router có thể có nhóm Telegram riêng.
   - Nhắc lại khi lỗi chưa được khắc phục. Bản tin tổng hợp hằng ngày.
   - Bot trả lời `/status` (xem tình trạng) và `/start` hoặc `/id` (cho biết Chat ID).
+- **Kiểm tra bảo mật & hiệu suất bằng AI**:
+  - Bộ khoảng 30 quy tắc có sẵn (miễn phí, chạy ngay trên máy NetPulse).
+  - Agent Claude (tuỳ chọn) đọc cấu hình router ở chế độ chỉ đọc, chấm điểm, viết tổng quan và đưa lệnh khắc phục.
+  - Mật khẩu và khoá không bao giờ rời máy; IP public và MAC được che trước khi gửi.
+  - Có thể tự kiểm tra hằng tuần và gửi tóm tắt qua Telegram/Zalo.
 - **Phân quyền**: quản trị viên và người xem. Người xem chỉ thấy các router được giao và bị chặn ở cả giao diện lẫn API.
 - **Sao lưu một chạm** khi đang chạy (bản sao database nhất quán).
 

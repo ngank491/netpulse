@@ -8,7 +8,8 @@ Tài liệu này hướng dẫn từng bước:
 4. [Nhận cảnh báo qua Telegram](#4-nhận-cảnh-báo-qua-telegram)
 5. [Nhận cảnh báo qua Zalo](#5-nhận-cảnh-báo-qua-zalo)
 6. [NetPulse cảnh báo những gì](#6-netpulse-cảnh-báo-những-gì)
-7. [Xử lý sự cố](#7-xử-lý-sự-cố)
+7. [Trợ lý AI kiểm tra bảo mật và hiệu suất](#7-trợ-lý-ai-kiểm-tra-bảo-mật-và-hiệu-suất)
+8. [Xử lý sự cố](#8-xử-lý-sự-cố)
 
 Trong hướng dẫn, `192.168.1.4` là IP máy chạy NetPulse và `192.168.1.1` là router. Hãy thay bằng địa chỉ thực tế của bạn.
 
@@ -263,7 +264,47 @@ Trang **Sự kiện** có ô tìm kiếm và bộ lọc theo mức (Cảnh báo 
 
 ---
 
-## 7. Xử lý sự cố
+## 7. Trợ lý AI kiểm tra bảo mật và hiệu suất
+
+Tab **Kiểm tra AI** trong trang router (chỉ quản trị viên chạy được; người xem chỉ đọc báo cáo).
+
+### Cách hoạt động
+
+1. NetPulse **đọc cấu hình router một lần, ở chế độ chỉ đọc**: firewall, NAT, dịch vụ quản trị, tài khoản, DNS, UPnP/SOCKS/proxy, Wi-Fi, scheduler/script, log, phiên bản RouterOS, bộ đếm lỗi interface, connection tracking… Không có lệnh nào thay đổi router.
+2. **Bộ kiểm tra có sẵn** (khoảng 30 quy tắc, miễn phí, chạy ngay trên máy NetPulse) chấm điểm và liệt kê vấn đề kèm lệnh khắc phục. Ví dụ: chain input không chặn WAN, Telnet/HTTP bật, DNS mở ra Internet, mở cổng RDP/SMB ra ngoài, dò mật khẩu trong log, script tải mã lạ, RouterOS cũ, thiếu FastTrack, cổng nhiều lỗi gói, CPU/RAM cao…
+3. Nếu bật **trợ lý AI (Claude)**, agent tự đọc thêm các mục cần thiết, đối chiếu lịch sử CPU/RAM/lưu lượng/sự kiện trong NetPulse, loại cảnh báo sai, tìm thêm vấn đề quy tắc bỏ sót (thứ tự rule, NAT, tài khoản lạ…). Sau đó agent viết **tổng quan, danh sách vấn đề theo mức độ và lệnh RouterOS khắc phục theo thứ tự an toàn**.
+
+Router ở **chế độ push** chỉ được phân tích bằng dữ liệu giám sát. Muốn kiểm tra cấu hình bảo mật đầy đủ, dùng chế độ REST API.
+
+### Bật trợ lý AI
+
+1. Tạo API key tại **console.anthropic.com → API Keys**. Tài khoản cần có credit.
+2. Vào **Cài đặt → Trợ lý AI kiểm tra router (Claude)**:
+   - dán **Anthropic API key**;
+   - chọn **Mô hình**: *Claude Opus 5.5* (phân tích kỹ nhất, mặc định), *Sonnet 5.5* (nhanh, rẻ hơn) hoặc *Haiku 5.5* (rẻ nhất);
+   - đánh dấu **Cho phép gửi cấu hình router … tới Anthropic**;
+   - giữ **Che IP public và địa chỉ MAC** (khuyên dùng);
+   - (tuỳ chọn) **Tự động kiểm tra hằng tuần**: sáng Chủ nhật, NetPulse kiểm tra mọi router và gửi tóm tắt qua Telegram/Zalo.
+3. **Lưu cài đặt**, rồi mở router → **Kiểm tra AI** → **Chạy kiểm tra**. Mỗi lần mất khoảng 1–3 phút. Trong lúc chạy, trang hiện agent đang xem mục nào.
+
+### Dữ liệu gửi đi và chi phí
+
+- **Không bao giờ gửi:** mật khẩu, khoá riêng, PSK Wi-Fi, khoá WireGuard. Các trường này không được đọc từ router; mật khẩu nằm trong nội dung script cũng bị che (`password=***`).
+- Khi bật **Che IP public và MAC**, NetPulse thay các giá trị này bằng mã (`PUBLIC-IP-1`, `MAC-3`) trước khi gửi, rồi đổi lại thành giá trị thật trong báo cáo trên máy bạn.
+- Mỗi báo cáo ghi rõ **agent đã xem những mục nào**, số token và **chi phí ước tính** (USD).
+- NetPulse dùng tính năng dự phòng của Anthropic: nếu mô hình chính từ chối một yêu cầu, một mô hình khác sẽ xử lý trong cùng lần gọi.
+- Không bật AI thì báo cáo vẫn có đầy đủ phần của bộ kiểm tra có sẵn.
+
+### Đọc báo cáo
+
+- **Điểm Bảo mật** và **Hiệu suất & ổn định** (0–100): từ 80 trở lên là tốt, 50–79 cần xử lý, dưới 50 là rủi ro cao.
+- **Vấn đề và cách khắc phục:** sắp xếp theo mức độ, mỗi mục có dữ liệu chứng minh và khối lệnh có nút **Sao chép**.
+- **Trước khi dán lệnh đổi firewall, dịch vụ hoặc tài khoản:** bật **Safe Mode** trong Terminal của WinBox (**Ctrl+X**). Nếu lỡ tự khoá mình, chỉ cần ngắt kết nối và router tự hoàn tác. Nên chạy từng lệnh một và kiểm tra lại.
+- Ô chọn ở đầu tab cho xem lại các lần kiểm tra trước để so sánh trước và sau khi sửa.
+
+---
+
+## 8. Xử lý sự cố
 
 | Thông báo / hiện tượng | Nguyên nhân | Cách sửa |
 |---|---|---|
@@ -279,6 +320,9 @@ Trang **Sự kiện** có ô tìm kiếm và bộ lọc theo mức (Cảnh báo 
 | Telegram/Zalo không nhận tin | Chưa lưu token, sai Chat ID, hoặc chưa nhắn bot trước | Xem lỗi đỏ cạnh tiêu đề kênh trong Cài đặt; nhắn bot rồi **Gửi tin thử** |
 | `Bot Token sai hoặc đã bị thu hồi` | Token bị đặt lại | Lấy token mới, dán lại |
 | Client hiện "MAC ngẫu nhiên" | Điện thoại/laptop dùng địa chỉ riêng tư | Bấm **Đặt tên** |
+| `Trợ lý AI lỗi: API key Anthropic không hợp lệ` | Sai key hoặc key đã bị thu hồi | Tạo key mới, dán lại trong Cài đặt |
+| `… vượt giới hạn tần suất hoặc hết hạn mức …` | Hết credit hoặc gọi quá nhiều | Nạp credit tại console.anthropic.com, thử lại sau |
+| Báo cáo ghi "Router ở chế độ push…" | Router không đọc được qua REST API | Chuyển router sang cách A để kiểm tra cấu hình đầy đủ |
 | Quên mật khẩu NetPulse | – | Dừng NetPulse, chạy `netpulse reset-password -data <thư mục dữ liệu> admin "MatKhauMoi123"` |
 
 Nếu vẫn không được, xem log của NetPulse. Với dịch vụ systemd của user:
