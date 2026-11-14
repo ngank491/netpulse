@@ -1,8 +1,8 @@
 name: NetPulse
-version: "0.1.0"
+version: "0.4.1"
 slug: netpulse
-description: Giám sát MikroTik gọn nhẹ – WAN, thiết bị, sơ đồ, cảnh báo Telegram
-url: https://github.com/OWNER/netpulse
+description: Giám sát MikroTik gọn nhẹ – WAN, thiết bị, sơ đồ, cảnh báo Telegram/Zalo, kiểm tra bảo mật bằng AI
+url: https://github.com/ngank491/netpulse
 arch:
   - amd64
   - aarch64
@@ -10,9 +10,9 @@ arch:
 startup: application
 boot: auto
 init: false
-# Thay OWNER bằng tài khoản GitHub của bạn. Image được CI build với RUN_USER=0
+# Image được CI build (khi đẩy tag v*) với RUN_USER=0
 # vì /data của add-on thuộc root.
-image: ghcr.io/OWNER/netpulse-ha
+image: ghcr.io/ngank491/netpulse-ha
 ports:
   8080/tcp: 8080
 ports_description:

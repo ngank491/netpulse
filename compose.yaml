@@ -1,6 +1,6 @@
 services:
   netpulse:
-    image: ghcr.io/OWNER/netpulse:latest   # hoặc: build: .
+    image: ghcr.io/ngank491/netpulse:latest   # hoặc: build: .
     container_name: netpulse
     restart: unless-stopped
     ports:

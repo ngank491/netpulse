@@ -81,7 +81,7 @@ WantedBy=multi-user.target
 ### Docker
 
 ```bash
-docker run -d --name netpulse --restart unless-stopped -p 8080:8080 -v netpulse-data:/data ghcr.io/OWNER/netpulse:latest
+docker run -d --name netpulse --restart unless-stopped -p 8080:8080 -v netpulse-data:/data ghcr.io/ngank491/netpulse:latest
 ```
 
 ```bash
@@ -92,8 +92,9 @@ Lệnh thứ hai hiện mã khởi tạo. Có thể dùng `compose.yaml` thay ch
 
 ### Home Assistant OS
 
-Thêm repository này vào **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, cài **NetPulse**, đặt `admin_password` rồi Start.
-Trước khi phát hành, cần thay `OWNER` trong `homeassistant/netpulse/config.yaml` và `repository.yaml` bằng tài khoản GitHub của bạn.
+Thêm `https://github.com/ngank491/netpulse` vào **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, cài **NetPulse**, đặt `admin_password` rồi Start.
+
+Image Docker/Home Assistant chỉ được CI build khi đẩy tag phiên bản (ví dụ `git tag v0.4.1 && git push origin v0.4.1`). Ở lần đầu, vào GitHub → Packages → `netpulse` và `netpulse-ha` → Package settings → đổi sang **Public** để Home Assistant và Docker tải được mà không cần đăng nhập.
 
 ### Tuỳ chọn
 
