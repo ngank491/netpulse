@@ -322,6 +322,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setupCode = ""
+	os.Remove(filepath.Join(s.cfg.DataDir, setupCodeFile))
 	u, err := s.st.UserByID(id)
 	if err != nil {
 		serverErr(w, err)

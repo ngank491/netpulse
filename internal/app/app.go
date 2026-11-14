@@ -20,6 +20,9 @@ import (
 
 var Version = "dev"
 
+// setupCodeFile holds the first-run code for hosts where the log is hard to read.
+const setupCodeFile = "setup-code.txt"
+
 type Config struct {
 	DataDir       string
 	Listen        string
@@ -208,8 +211,13 @@ func Run(ctx context.Context, cfg *Config) error {
 			log.Printf("đã tạo tài khoản quản trị %q từ cấu hình", cfg.AdminUser)
 		} else {
 			srv.setupCode = setupCode()
+			codeFile := filepath.Join(cfg.DataDir, setupCodeFile)
+			if err := writeFileAtomic(codeFile, []byte(srv.setupCode+"\n"), 0o600); err != nil {
+				log.Printf("không ghi được %s: %v", codeFile, err)
+			}
 			log.Printf("================================================")
 			log.Printf("  LẦN CHẠY ĐẦU – mở trình duyệt và nhập mã: %s", srv.setupCode)
+			log.Printf("  (mã cũng được lưu trong %s)", codeFile)
 			log.Printf("================================================")
 		}
 	}

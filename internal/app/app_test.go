@@ -8,6 +8,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -237,8 +238,13 @@ func TestSetupLoginAndCSRF(t *testing.T) {
 	if code := h.call("POST", "/api/setup", map[string]string{"code": "WRONG", "username": "admin", "password": "0123456789"}, nil); code != 403 {
 		t.Fatalf("bad setup code = %d", code)
 	}
+	codeFile := filepath.Join(h.srv.cfg.DataDir, setupCodeFile)
+	writeFileAtomic(codeFile, []byte("ABCD-EFGH\n"), 0o600)
 	if code := h.call("POST", "/api/setup", map[string]string{"code": "abcd-efgh", "username": "admin", "password": "0123456789"}, nil); code != 200 {
 		t.Fatalf("setup = %d", code)
+	}
+	if _, err := os.Stat(codeFile); !os.IsNotExist(err) {
+		t.Fatal("setup code file must be removed after setup")
 	}
 	if code := h.call("POST", "/api/setup", map[string]string{"code": "abcd-efgh", "username": "x2", "password": "0123456789"}, nil); code != 409 {
 		t.Fatalf("second setup = %d", code)
